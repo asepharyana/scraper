@@ -1,0 +1,132 @@
+
+[package]
+name = "scraper-service"
+version = "0.1.0"
+edition = "2021"
+description = "A batteries-included, production-ready Rust web framework built on Axum"
+authors = ["Asep Haryana"]
+license = "MIT"
+repository = "https://github.com/MythEclipse/ultimate-asepharyana.tech"
+keywords = ["web", "framework", "axum", "api", "rest"]
+categories = ["web-programming::http-server", "web-programming::websocket"]
+default-run = "scraper"
+
+# Dependensi yang dibutuhkan saat aplikasi berjalan
+[dependencies]
+axum = { version = "0.8.8", features = ["ws", "multipart", "macros"] }
+tokio = { version = "1.49.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+# sqlx removed - SeaORM uses it internally via sqlx-postgres feature
+sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid"] }
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+bytes = "1.11.0"
+futures = "0.3"
+reqwest = { version = "0.12.28", features = ["json", "stream", "multipart"] }
+http = "1.4.0"
+sha1 = "0.10.6"
+data-url = "0.3.2"
+base64 = "0.22.1"
+tokio-util = { version = "0.7.18", features = ["codec"] }
+async-trait = "0.1.89"
+regex = "1.12.2"
+infer = "0.19.0"
+
+once_cell = "1.21.3"
+urlencoding = "2.1"
+
+url = "2.5.8"
+rand = "0.8"
+tempfile = "3.24.0"
+mime_guess = "2.0.5"
+
+tower-http = { version = "0.6.8", features = ["fs", "cors", "compression-gzip", "compression-br", "compression-zstd"] }
+backoff = { version = "0.4", features = ["futures", "tokio"] }
+dashmap = "6.1"
+deadpool-redis = { version = "0.22.1", features = ["serde"] }
+rayon = "1.11"
+tl = "0.7.8"
+tower = { version = "0.5", features = ["make"] }
+scraper = "0.25.0"
+flate2 = "1.1"
+redis = { version = "0.32.7", features = ["tokio-rustls-comp", "safe_iterators"] }
+thiserror = "2.0.18"
+itertools = "0.14"
+clap = { version = "4.5", features = ["derive"] }
+config = { version = "0.15.19", features = ["toml"] }
+governor = "0.10.4"
+tokio-cron-scheduler = "0.15.1"
+hex = "0.4.3"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+log = "0.4"
+walkdir = "2.5"
+utoipa = { version = "5.0", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+utoipa-axum = "0.2.0"
+
+# OpenTelemetry metrics
+opentelemetry = { version = "0.27", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["metrics"] }
+opentelemetry-semantic-conventions = "0.27"
+
+
+# Dependensi yang hanya dibutuhkan untuk build script (build.rs)
+
+# Dependensi yang hanya dibutuhkan untuk tes
+[dev-dependencies]
+sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid", "mock"] }
+
+# Definisi targets secara eksplisit untuk menghindari peringatan cargo-chef (edition/plugin)
+[lib]
+name = "scraper_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scraper"
+path = "src/main.rs"
+
+
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_variables = "deny"
+unused_imports = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[features]
+# default = ["ffmpeg"]
+ffmpeg = []
+
+# Profile optimasi untuk production - fokus pada performa runtime maksimal
+[profile.release]
+opt-level = 3           # Optimasi level maksimal
+lto = "fat"             # Full LTO untuk inlining maksimal dan binary optimal
+codegen-units = 1       # Single codegen unit untuk optimasi maksimal (lebih lambat build, binary lebih cepat)
+incremental = false     # Disable incremental untuk optimasi penuh
+debug = false           # No debug info untuk binary lebih kecil
+strip = true            # Strip symbols untuk binary lebih kecil
+panic = "abort"         # Abort on panic (binary lebih kecil dan lebih cepat)
+overflow-checks = false # Non-overflowing arithmetic for speed (disable in debug)
+
+# Optimize dependencies too
+[profile.dev]
+opt-level = 0
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
