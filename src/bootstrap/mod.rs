@@ -1,3 +1,5 @@
+pub mod setup;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -6,9 +8,9 @@ use axum::Router;
 use sea_orm::Database;
 use tracing_subscriber::EnvFilter;
 
-use crate::shared::config::CONFIG;
-use crate::shared::database::get_redis_conn;
-use crate::shared::state::AppState;
+use crate::config::CONFIG;
+use crate::infrastructure::cache::redis_pool::get_redis_conn;
+use crate::presentation::state::AppState;
 
 pub struct Application {
     pub port: u16,
@@ -27,7 +29,7 @@ impl Application {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
         // Initialize OpenTelemetry metrics
-        crate::shared::observability::metrics::init_otel_metrics();
+        crate::observability::metrics::init_otel_metrics();
 
         tracing::info!("🚀 Scraper starting up...");
         tracing::info!("   Environment: {}", CONFIG.environment);
@@ -46,8 +48,8 @@ impl Application {
 
         // Browser Pool
         tracing::info!("Initializing browser pool...");
-        let browser_config = crate::shared::browser::BrowserPoolConfig::default();
-        match crate::shared::browser::pool::init_browser_pool(browser_config).await {
+        let browser_config = crate::infrastructure::browser::BrowserPoolConfig::default();
+        match crate::infrastructure::browser::pool::init_browser_pool(browser_config).await {
             Ok(_) => tracing::info!("✓ Browser pool initialized"),
             Err(e) => tracing::error!("⚠️ Failed to initialize browser pool: {}", e),
         }
@@ -76,7 +78,7 @@ impl Application {
         tracing::info!("✓ SeaORM database connection established");
 
         // Schema & Seeding
-        if let Err(e) = crate::shared::database::setup::init(&db).await {
+        if let Err(e) = crate::bootstrap::setup::init(&db).await {
             tracing::error!("Failed to init DB schema: {}", e);
         }
 
@@ -85,19 +87,26 @@ impl Application {
         let image_processing_semaphore = Arc::new(tokio::sync::Semaphore::new(
             CONFIG.image_processing_concurrency,
         ));
-        let event_bus = Arc::new(crate::shared::events::bus::EventBus::new());
+        let event_bus = Arc::new(crate::events::bus::EventBus::new());
 
-        let redis_pool = crate::shared::database::redis_pool()
+        let redis_pool = crate::infrastructure::cache::redis_pool::redis_pool()
             .map_err(|e| anyhow::anyhow!("Failed to init Redis pool: {}", e))?;
+
+        use crate::infrastructure::repository::SeaOrmImageCacheRepository;
+        let image_cache_repo = Arc::new(SeaOrmImageCacheRepository::new(
+            db_arc.clone(),
+            redis_pool.clone(),
+        ));
 
         let app_state = Arc::new(AppState {
             redis_pool,
             db: db_arc.clone(),
             image_processing_semaphore,
             event_bus: event_bus.clone(),
+            image_cache_repo,
         });
 
-        let app = crate::app::build_router(app_state, db_arc.clone()).await?;
+        let app = crate::presentation::router::build_router(app_state.clone())?;
 
         // Listener
         let port = CONFIG.server_port;

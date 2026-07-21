@@ -1,0 +1,1142 @@
+//! Image caching helper using Picser CDN (picser.pages.dev).
+//!
+//! This module provides utilities to cache images via jsDelivr CDN
+//! with database storage for URL mapping.
+
+use crate::config::CONFIG;
+use crate::domain::repository::ImageCacheRepository;
+use crate::infrastructure::repository::SeaOrmImageCacheRepository;
+use deadpool_redis::Pool as RedisPool;
+use reqwest::Client;
+use sea_orm::DatabaseConnection;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{debug, error, warn};
+
+use crate::infrastructure::cache::redis::Cache;
+
+/// Default TTL for image cache in Redis (24 hours)
+pub const CACHE_TTL_IMAGE: u64 = 86400;
+use crate::infrastructure::utils::http_client::http_client;
+
+/// Default TTL for image cache in Redis (24 hours)
+pub const IMAGE_CACHE_TTL: u64 = CACHE_TTL_IMAGE;
+
+/// Redis key prefix for image cache
+pub const IMAGE_CACHE_PREFIX: &str = "img_cache";
+
+/// Redis key prefix for caching locks (to prevent duplicate uploads)
+pub const IMAGE_CACHE_LOCK_PREFIX: &str = "img_cache_lock";
+
+/// Lock TTL (60 seconds - enough time for upload to complete)
+pub const IMAGE_CACHE_LOCK_TTL: u64 = 60;
+
+/// Static Picser API endpoints in priority order. Configured endpoint is inserted after primary.
+pub const STATIC_PICSER_API_ENDPOINTS: &[&str] = &[
+    "https://picser-two.vercel.app/api/upload",
+    "https://picser-mytheclipse8647-ahoqi9ef.leapcell.dev/api/upload",
+    "https://picser.pages.dev/api/upload",
+];
+
+/// Create a hash of the URL for cache key
+pub fn url_hash(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..16]) // Use 16 bytes for collision-resistant key
+}
+
+/// Helper to convert any image URL to a fast WP.com (Jetpack) CDN URL.
+/// This acts as a high-speed proxy even before Picser finishes caching.
+pub fn to_wp_cdn(url: &str) -> String {
+    if url.is_empty() {
+        return url.to_string();
+    }
+
+    // If already a CDN URL, return as is
+    if url.contains("picser.pages.dev")
+        || url.contains("jsdelivr.net")
+        || url.contains("wp.com")
+        || url.contains("imagecdn.app")
+    {
+        return url.to_string();
+    }
+
+    // Remove protocol for wp.com format
+    let clean_url = url.trim().replace("https://", "").replace("http://", "");
+
+    // Use i0, i1, i2 or i3 based on hash to distribute load
+    let hash = url.len() % 4;
+    format!("https://i{}.wp.com/{}", hash, clean_url)
+}
+
+/// Response from Picser API (/api/upload)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PicserResponse {
+    #[serde(default)]
+    pub success: bool,
+    pub url: Option<String>,
+    pub urls: Option<PicserUrls>,
+    pub filename: Option<String>,
+    pub size: Option<u64>,
+    #[serde(rename = "type")]
+    pub content_type: Option<String>,
+    pub commit_sha: Option<String>,
+    pub github_url: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PicserUrls {
+    pub github: Option<String>,
+    pub raw: Option<String>,
+    pub jsdelivr: Option<String>,
+    pub jsdelivr_commit: Option<String>,
+}
+
+/// Response from fallback upload API (/api/upload)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackUploadResponse {
+    pub download_url: String,
+}
+
+/// Configuration for image cache
+#[derive(Debug, Clone)]
+pub struct ImageCacheConfig {
+    /// GitHub token for Picser API (optional - uses public upload if not set)
+    pub github_token: Option<String>,
+    /// GitHub owner for uploads
+    pub github_owner: String,
+    /// GitHub repo for uploads
+    pub github_repo: String,
+    /// GitHub branch
+    pub github_branch: String,
+    /// Upload folder
+    pub folder: String,
+}
+
+impl Default for ImageCacheConfig {
+    fn default() -> Self {
+        Self {
+            github_token: None,
+            github_owner: "sh20raj".to_string(),
+            github_repo: "picser".to_string(),
+            github_branch: "main".to_string(),
+            folder: "uploads".to_string(),
+        }
+    }
+}
+
+/// Image cache service
+pub struct ImageCache {
+    repo: Arc<dyn ImageCacheRepository>,
+    client: Client,
+    _config: ImageCacheConfig,
+    semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+}
+
+// Add imports for Request Coalescing
+use dashmap::DashMap;
+use std::sync::LazyLock;
+use tokio::sync::broadcast;
+
+// Global In-Flight Uploads Map
+// Maps Original URL -> Broadcast Sender
+static IN_FLIGHT_UPLOADS: LazyLock<DashMap<String, broadcast::Sender<Result<String, String>>>> =
+    LazyLock::new(DashMap::new);
+
+impl ImageCache {
+    /// Create a new image cache instance
+    pub fn new(repo: Arc<dyn ImageCacheRepository>) -> Self {
+        Self {
+            repo,
+            client: http_client().client().clone(), // Reuse global HTTP client for connection pooling
+            _config: ImageCacheConfig::default(),
+            semaphore: None,
+        }
+    }
+
+    pub fn with_config(repo: Arc<dyn ImageCacheRepository>, config: ImageCacheConfig) -> Self {
+        Self {
+            repo,
+            client: http_client().client().clone(), // Reuse global HTTP client
+            _config: config,
+            semaphore: None,
+        }
+    }
+
+    /// Set concurrency limiter
+    pub fn with_semaphore(mut self, semaphore: std::sync::Arc<tokio::sync::Semaphore>) -> Self {
+        self.semaphore = Some(semaphore);
+        self
+    }
+
+    /// Get CDN URL for an image, caching if needed
+    pub async fn get_or_cache(&self, original_url: &str) -> Result<String, String> {
+        let cache_key = format!("{}:{}", IMAGE_CACHE_PREFIX, url_hash(original_url));
+        let lock_key = format!("{}:{}", IMAGE_CACHE_LOCK_PREFIX, url_hash(original_url));
+
+        // 1. Check Redis cache first
+
+        if let Some(cached_url) = self.repo.get_from_redis(&cache_key).await {
+            debug!("ImageCache: Redis hit for {}", original_url);
+            return Ok(cached_url);
+        }
+
+        // 2. Check Request Coalescing (SingleFlight)
+        // This handles concurrent requests in this process/instance
+        let (tx, is_leader) = {
+            use dashmap::mapref::entry::Entry;
+            match IN_FLIGHT_UPLOADS.entry(original_url.to_string()) {
+                Entry::Occupied(entry) => {
+                    debug!("ImageCache: Joining in-flight upload for {}", original_url);
+                    (entry.get().clone(), false)
+                }
+                Entry::Vacant(entry) => {
+                    let (tx, _) = broadcast::channel(1);
+                    entry.insert(tx.clone());
+                    debug!("ImageCache: Starting leader upload for {}", original_url);
+                    (tx, true)
+                }
+            }
+        };
+
+        if !is_leader {
+            // Follower: Wait for result
+            let mut rx = tx.subscribe();
+            return match rx.recv().await {
+                Ok(Ok(url)) => Ok(url),
+                Ok(Err(e)) => Err(e),
+                Err(e) => {
+                    warn!(
+                        "ImageCache: Coalesce receive error for {}: {:?}",
+                        original_url, e
+                    );
+                    Err("Upload coalescing failed".to_string())
+                }
+            };
+        }
+
+        // Leader: Perform the work
+        // We wrap the work in a closure/block to easily capture the result
+        let result = async {
+            // 3. Check database (Double check inside leader to be sure)
+            if let Some(cached_url) = self.repo.get_from_db(original_url).await? {
+                // Store in Redis for faster access
+                let _ = self
+                    .repo
+                    .set_in_redis(&cache_key, &cached_url, IMAGE_CACHE_TTL)
+                    .await;
+                debug!("ImageCache: DB hit for {}", original_url);
+                return Ok(cached_url);
+            }
+
+            // 4. Check if another process is already caching this URL (Distributed Lock check)
+            if self.repo.get_lock(&lock_key).await {
+                // Even if locked by another process, strict single-flight within this instance
+                // is good. But if another process is working, we might want to wait or just return error?
+                // Current logic returns error.
+                debug!(
+                    "ImageCache: Already being cached by another process: {}",
+                    original_url
+                );
+                return Err(format!("URL {} is already being cached", original_url));
+            }
+
+            // 5. Acquire lock in Redis
+            let _ = self.repo.set_lock(&lock_key, IMAGE_CACHE_LOCK_TTL).await;
+
+            // 6. Upload
+            debug!("ImageCache: Miss - uploading {} to Picser", original_url);
+
+            // Acquire permit if semaphore is set
+            let _permit = if let Some(sem) = &self.semaphore {
+                match sem.acquire().await {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        let _ = self.repo.release_lock(&lock_key).await;
+                        return Err(e.to_string());
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Work
+            let work_result = async {
+                // Upload to Picser
+                let cdn_url = self.upload_to_picser(original_url).await?;
+
+                // 6.5. Verify CDN URL Propagation (Self-Test before caching)
+                // CDNs like jsDelivr can take a few seconds to propagate after a GitHub commit.
+                // We retry 3 times with backoff to ensure we only return and cache a functional link.
+                let mut is_valid = false;
+                let mut last_verify_error = String::from("Verification not started");
+
+                for attempt in 1..=10 {
+                    debug!(
+                        "ImageCache: Verifying CDN URL {} (Attempt {})",
+                        cdn_url, attempt
+                    );
+                    match self.verify_cdn_url(&cdn_url).await {
+                        Ok(true) => {
+                            is_valid = true;
+                            debug!(
+                                "ImageCache: CDN URL verified successfully for {}",
+                                original_url
+                            );
+                            break;
+                        }
+                        Ok(false) => {
+                            last_verify_error = "CDN returned non-image data or 404".to_string();
+                        }
+                        Err(e) => {
+                            last_verify_error = e;
+                        }
+                    }
+
+                    if attempt < 10 {
+                        // Progressive backoff: 1s, 2s, 3s... up to 10s
+                        let delay = 1000 * attempt;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+                    }
+                }
+
+                if !is_valid {
+                    error!(
+                        "ImageCache: CDN verification failed for {} after 10 attempts: {}",
+                        cdn_url, last_verify_error
+                    );
+                    return Err(format!(
+                        "CDN link was not accessible after upload: {}",
+                        last_verify_error
+                    ));
+                }
+
+                // Save to database only after successful verification
+                self.repo.save_to_db(original_url, &cdn_url).await?;
+
+                // Cache in Redis
+                let _ = self
+                    .repo
+                    .set_in_redis(&cache_key, &cdn_url, IMAGE_CACHE_TTL)
+                    .await;
+
+                // Invalidate API caches
+                let _ = self
+                    .repo
+                    .invalidate_api_caches(vec!["anime:*", "anime2:*", "komik:*"])
+                    .await;
+
+                Ok(cdn_url)
+            }
+            .await;
+
+            // Release Redis lock
+            let _ = self.repo.release_lock(&lock_key).await;
+
+            work_result
+        }
+        .await;
+
+        // Broadcast result
+        let _ = tx.send(result.clone());
+
+        // Remove from map
+        IN_FLIGHT_UPLOADS.remove(original_url);
+
+        result
+    }
+
+    /// Get CDN URL without uploading (read-only lookup)
+    pub async fn get_cdn_url(&self, original_url: &str) -> Option<String> {
+        let cache_key = format!("{}:{}", IMAGE_CACHE_PREFIX, url_hash(original_url));
+
+        // Check Redis first
+        if let Some(cached_url) = self.repo.get_from_redis(&cache_key).await {
+            return Some(cached_url);
+        }
+
+        // Check database
+        if let Ok(Some(cdn_url)) = self.repo.get_from_db(original_url).await {
+            return Some(cdn_url);
+        }
+
+        None
+    }
+
+    /// Find an original URL for a given CDN URL (reverse lookup)
+    pub async fn find_original_from_cdn(&self, cdn_url: &str) -> Option<String> {
+        self.repo
+            .find_original_from_cdn(cdn_url)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Invalidate cache for a URL
+    pub async fn invalidate(&self, original_url: &str) -> Result<(), String> {
+        let cache_key = format!("{}:{}", IMAGE_CACHE_PREFIX, url_hash(original_url));
+
+        // Remove from Redis
+        let _ = self.repo.delete_from_redis(&cache_key).await;
+
+        // Remove from database
+        self.repo.delete_from_db(original_url).await?;
+
+        debug!("ImageCache: Invalidated {}", original_url);
+        Ok(())
+    }
+
+    /// Helper to perform a single upload attempt
+    async fn perform_single_upload(
+        &self,
+        api_url: &str,
+        image_bytes: &[u8],
+        filename: &str,
+    ) -> Result<PicserResponse, String> {
+        debug!("ImageCache: Attempting upload to API server: {}", api_url);
+
+        let part = reqwest::multipart::Part::bytes(image_bytes.to_vec())
+            .file_name(filename.to_string())
+            .mime_str("image/jpeg")
+            .map_err(|e| {
+                let err = format!("Failed to create multipart form for {}: {}", api_url, e);
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .client
+            .post(api_url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                let err = format!("Failed to send request to Picser API ({}): {}", api_url, e);
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        let response_status = response.status();
+        let response_text = response.text().await.map_err(|e| {
+            let err = format!(
+                "Failed to read Picser response from {} (Status {}): {}",
+                api_url, response_status, e
+            );
+            error!("ImageCache: {}", err);
+            err
+        })?;
+
+        // Raw responses stay at debug level for troubleshooting without noisy default logs
+        debug!(
+            "ImageCache: Raw response from {} (Status {}): {}",
+            api_url, response_status, response_text
+        );
+
+        if !response_status.is_success() {
+            let error_message = serde_json::from_str::<serde_json::Value>(&response_text)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(|error| error.as_str())
+                        .map(|error| error.to_string())
+                        .or_else(|| {
+                            value
+                                .get("message")
+                                .and_then(|message| message.as_str())
+                                .map(|message| message.to_string())
+                        })
+                })
+                .unwrap_or_else(|| response_text.clone());
+
+            let err = format!(
+                "Picser upload failed at {} (HTTP {}): {}",
+                api_url, response_status, error_message
+            );
+            error!("ImageCache: {}", err);
+            return Err(err);
+        }
+
+        let picser_response: PicserResponse =
+            serde_json::from_str(&response_text).map_err(|e| {
+                let err = format!(
+                    "Failed to parse Picser response from {}: {} - Raw: {}",
+                    api_url, e, response_text
+                );
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        if !picser_response.success {
+            let err_msg = picser_response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string());
+            let err = format!(
+                "Picser upload failed at {} (server error): {}",
+                api_url, err_msg
+            );
+            error!("ImageCache: {}", err);
+            return Err(err);
+        }
+
+        debug!("ImageCache: Upload successful to API server: {}", api_url);
+        Ok(picser_response)
+    }
+
+    fn picser_api_endpoints(&self) -> Vec<String> {
+        let configured = CONFIG.urls.picser_api_url.clone();
+        let mut endpoints = vec![STATIC_PICSER_API_ENDPOINTS[0].to_string()];
+        if !configured.is_empty() && !endpoints.contains(&configured) {
+            endpoints.push(configured);
+        }
+        for endpoint in STATIC_PICSER_API_ENDPOINTS.iter().skip(1) {
+            let endpoint = endpoint.to_string();
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+        endpoints
+    }
+
+    async fn upload_to_fallback_api(
+        &self,
+        image_bytes: &[u8],
+        filename: &str,
+    ) -> Result<String, String> {
+        debug!(
+            "ImageCache: Attempting fallback upload to: {}",
+            CONFIG.urls.fallback_upload_api_url
+        );
+
+        let part = reqwest::multipart::Part::bytes(image_bytes.to_vec())
+            .file_name(filename.to_string())
+            .mime_str("image/jpeg")
+            .map_err(|e| {
+                let err = format!("Failed to create fallback multipart form: {}", e);
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("fileName", filename.to_string());
+
+        let response = self
+            .client
+            .post(&CONFIG.urls.fallback_upload_api_url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                let err = format!(
+                    "Failed to send request to fallback upload API ({}): {}",
+                    CONFIG.urls.fallback_upload_api_url, e
+                );
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        let response_status = response.status();
+        let response_text = response.text().await.map_err(|e| {
+            let err = format!(
+                "Failed to read fallback upload response from {} (Status {}): {}",
+                CONFIG.urls.fallback_upload_api_url, response_status, e
+            );
+            error!("ImageCache: {}", err);
+            err
+        })?;
+
+        debug!(
+            "ImageCache: Raw response from fallback upload API (Status {}): {}",
+            response_status, response_text
+        );
+
+        if !response_status.is_success() {
+            let err = format!(
+                "Fallback upload failed at {} (HTTP {}): {}",
+                CONFIG.urls.fallback_upload_api_url, response_status, response_text
+            );
+            error!("ImageCache: {}", err);
+            return Err(err);
+        }
+
+        let fallback_response: FallbackUploadResponse = serde_json::from_str(&response_text)
+            .map_err(|e| {
+                let err = format!(
+                    "Failed to parse fallback upload response from {}: {} - Raw: {}",
+                    CONFIG.urls.fallback_upload_api_url, e, response_text
+                );
+                error!("ImageCache: {}", err);
+                err
+            })?;
+
+        if fallback_response.download_url.trim().is_empty() {
+            return Err("Fallback upload response did not include download_url".to_string());
+        }
+
+        debug!(
+            "ImageCache: Fallback upload successful - URL: {}",
+            fallback_response.download_url
+        );
+        Ok(fallback_response.download_url)
+    }
+
+    async fn download_image_bytes(&self, original_url: &str) -> Result<bytes::Bytes, String> {
+        let mut candidates = vec![original_url.to_string()];
+        if original_url.contains("https://alqanime.net/wp-content/") {
+            candidates.push(original_url.replace("https://alqanime.net/", "https://alqanime.si/"));
+        }
+
+        let mut last_error = String::from("No download attempt started");
+        for candidate in candidates {
+            debug!(
+                "ImageCache: Starting image download from source: {}",
+                candidate
+            );
+            match self.client.get(&candidate).send().await {
+                Ok(response) => match response.bytes().await {
+                    Ok(bytes) => {
+                        let is_valid_image = infer::get(&bytes)
+                            .map(|kind| kind.mime_type().starts_with("image/"))
+                            .unwrap_or(false);
+                        if is_valid_image {
+                            return Ok(bytes);
+                        }
+
+                        let trace_preview = String::from_utf8_lossy(&bytes)
+                            .chars()
+                            .take(100)
+                            .collect::<String>();
+                        last_error = format!(
+                            "Image source ({}) returned non-image data (Preview: {})",
+                            candidate, trace_preview
+                        );
+                        warn!("ImageCache: {}", last_error);
+                    }
+                    Err(e) => {
+                        last_error = format!(
+                            "Failed to read image bytes from source ({}): {}",
+                            candidate, e
+                        );
+                        warn!("ImageCache: {}", last_error);
+                    }
+                },
+                Err(e) => {
+                    last_error = format!(
+                        "Failed to download image from source ({}): {}",
+                        candidate, e
+                    );
+                    warn!("ImageCache: {}", last_error);
+                }
+            }
+        }
+
+        error!("ImageCache: {}", last_error);
+        Err(last_error)
+    }
+
+    /// Upload image to Picser CDN with fallback upload API support
+    async fn upload_to_picser(&self, original_url: &str) -> Result<String, String> {
+        // Download the image first
+        let image_bytes = self.download_image_bytes(original_url).await?;
+
+        debug!(
+            "ImageCache: Image downloaded successfully, size: {} bytes",
+            image_bytes.len()
+        );
+
+        // Determine filename from URL
+        let filename = self.extract_filename(original_url);
+
+        debug!(
+            "ImageCache: Will attempt upload to {} API endpoints sequentially with failover",
+            self.picser_api_endpoints().len()
+        );
+
+        let mut last_failed_api = String::from("Unknown");
+        let picser_api_endpoints = self.picser_api_endpoints();
+        let picser_api_count = picser_api_endpoints.len();
+
+        for (attempt_num, api_url) in picser_api_endpoints.iter().enumerate() {
+            let attempt_number = attempt_num + 1;
+            debug!(
+                "ImageCache: [Attempt {}/{}] Uploading {} bytes to: {}",
+                attempt_number,
+                picser_api_count,
+                image_bytes.len(),
+                api_url
+            );
+
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.perform_single_upload(api_url, &image_bytes, &filename),
+            )
+            .await
+            {
+                Ok(Ok(response)) => match self.extract_cdn_url(response, original_url) {
+                    Ok(cdn_url) => {
+                        debug!(
+                            "ImageCache: Upload succeeded on attempt {}/{} - CDN URL: {}",
+                            attempt_number, picser_api_count, cdn_url
+                        );
+                        return Ok(cdn_url);
+                    }
+                    Err(e) => {
+                        last_failed_api = api_url.to_string();
+                        warn!(
+                                "ImageCache: [Attempt {}/{}] Upload from {} did not yield a CDN URL: {}",
+                                attempt_number,
+                                picser_api_count,
+                                api_url,
+                                e
+                            );
+                        error!(
+                            "ImageCache: Attempt {}/{} failed - Last failed API: {} - Error: {}",
+                            attempt_number, picser_api_count, last_failed_api, e
+                        );
+                    }
+                },
+                Ok(Err(e)) => {
+                    last_failed_api = api_url.to_string();
+                    warn!(
+                        "ImageCache: [Attempt {}/{}] Upload to {} failed: {}",
+                        attempt_number, picser_api_count, api_url, e
+                    );
+                    error!(
+                        "ImageCache: Attempt {}/{} failed - Last failed API: {} - Error: {}",
+                        attempt_number, picser_api_count, last_failed_api, e
+                    );
+                }
+                Err(_) => {
+                    last_failed_api = api_url.to_string();
+                    let err = format!("Timeout (30s) while uploading to API endpoint: {}", api_url);
+                    warn!(
+                        "ImageCache: [Attempt {}/{}] {}",
+                        attempt_number, picser_api_count, err
+                    );
+                    error!(
+                        "ImageCache: Attempt {}/{} failed - Last failed API: {} - Error: {}",
+                        attempt_number, picser_api_count, last_failed_api, err
+                    );
+                }
+            }
+        }
+
+        warn!(
+            "ImageCache: All {} Picser upload attempts failed for source URL: {}. Trying fallback upload API: {}",
+            picser_api_count,
+            original_url,
+            CONFIG.urls.fallback_upload_api_url
+        );
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.upload_to_fallback_api(&image_bytes, &filename),
+        )
+        .await
+        {
+            Ok(Ok(cdn_url)) => Ok(cdn_url),
+            Ok(Err(e)) => {
+                error!(
+                    "ImageCache: Fallback upload API failed after Picser failures. Last Picser API: {} - Fallback error: {}",
+                    last_failed_api, e
+                );
+                Err(format!(
+                    "All {} Picser upload attempts and fallback upload API failed. Last Picser API endpoint: {}. Fallback error: {}",
+                    picser_api_count,
+                    last_failed_api,
+                    e
+                ))
+            }
+            Err(_) => {
+                let err = format!(
+                    "Timeout (30s) while uploading to fallback API endpoint: {}",
+                    CONFIG.urls.fallback_upload_api_url
+                );
+                error!(
+                    "ImageCache: Fallback upload API timed out after Picser failures. Last Picser API: {} - {}",
+                    last_failed_api, err
+                );
+                Err(format!(
+                    "All {} Picser upload attempts and fallback upload API failed. Last Picser API endpoint: {}. Fallback error: {}",
+                    picser_api_count,
+                    last_failed_api,
+                    err
+                ))
+            }
+        }
+    }
+
+    /// Internally verify a CDN URL's accessibility and validity
+    pub async fn verify_cdn_url(&self, cdn_url: &str) -> Result<bool, String> {
+        let resp = self.client.get(cdn_url).send().await.map_err(|e| {
+            let err = format!("Network error verifying CDN URL ({}): {}", cdn_url, e);
+            warn!("ImageCache: {}", err);
+            err
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err = format!(
+                "CDN verification failed with HTTP {} for URL: {}",
+                status, cdn_url
+            );
+            warn!("ImageCache: {}", err);
+            return Ok(false);
+        }
+
+        let bytes = resp.bytes().await.map_err(|e| {
+            let err = format!("Failed to read bytes from CDN URL ({}): {}", cdn_url, e);
+            warn!("ImageCache: {}", err);
+            err
+        })?;
+
+        // Structural verification (Fast MIME check)
+        let is_valid = infer::get(&bytes)
+            .map(|k| k.mime_type().starts_with("image/"))
+            .unwrap_or(false);
+
+        if is_valid {
+            debug!(
+                "ImageCache: CDN URL verified successfully - content is valid image: {}",
+                cdn_url
+            );
+            Ok(true)
+        } else {
+            warn!(
+                "ImageCache: CDN URL verification failed - content is not a valid image ({}): {}",
+                cdn_url,
+                String::from_utf8_lossy(&bytes[0..std::cmp::min(100, bytes.len())])
+            );
+            Ok(false)
+        }
+    }
+
+    /// Extract CDN URL from Picser response
+    fn extract_cdn_url(
+        &self,
+        response: PicserResponse,
+        original_url: &str,
+    ) -> Result<String, String> {
+        // Try to extract CDN URL from various response fields
+        if let Some(urls) = &response.urls {
+            if let Some(url) = &urls.raw {
+                debug!(
+                    "ImageCache: Using CDN URL from urls.raw for source: {}",
+                    original_url
+                );
+                return Ok(url.clone());
+            }
+            if let Some(url) = &urls.jsdelivr_commit {
+                debug!(
+                    "ImageCache: Using CDN URL from urls.jsdelivr_commit for source: {}",
+                    original_url
+                );
+                return Ok(url.clone());
+            }
+            if let Some(url) = &urls.jsdelivr {
+                debug!(
+                    "ImageCache: Using CDN URL from urls.jsdelivr for source: {}",
+                    original_url
+                );
+                return Ok(url.clone());
+            }
+            if let Some(url) = &urls.github {
+                debug!(
+                    "ImageCache: Using CDN URL from urls.github for source: {}",
+                    original_url
+                );
+                return Ok(url.clone());
+            }
+        }
+
+        if let Some(url) = &response.url {
+            debug!(
+                "ImageCache: Using CDN URL from response.url for source: {}",
+                original_url
+            );
+            return Ok(url.clone());
+        }
+
+        if let Some(url) = &response.github_url {
+            debug!(
+                "ImageCache: Using CDN URL from response.github_url for source: {}",
+                original_url
+            );
+            return Ok(url.clone());
+        }
+
+        // If we get here, no CDN URL was found in the response
+        error!(
+            "ImageCache: No CDN URL found in Picser API response for source URL: {}. Response fields - success: {}, has_urls: {}, has_url: {}, has_github_url: {}, error: {}",
+            original_url,
+            response.success,
+            response.urls.is_some(),
+            response.url.is_some(),
+            response.github_url.is_some(),
+            response.error.as_deref().unwrap_or("none")
+        );
+        Err(format!(
+            "No CDN URL in Picser response. Checked: urls.{{jsdelivr_commit,jsdelivr,raw,github}}, url, github_url. Response error: {}",
+            response.error.unwrap_or_else(|| "none".to_string())
+        ))
+    }
+
+    /// Extract filename from URL
+    fn extract_filename(&self, url: &str) -> String {
+        url.split('/')
+            .last()
+            .and_then(|s| s.split('?').next())
+            .filter(|s| !s.is_empty() && s.contains('.'))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}.jpg", url_hash(url)))
+    }
+}
+
+/// Convenience function to create a CDN URL for an image
+/// Returns the original URL if caching fails (graceful fallback)
+pub async fn cache_image_url(
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    original_url: &str,
+) -> String {
+    let repo = Arc::new(SeaOrmImageCacheRepository::new(db, redis.clone()));
+    let cache = ImageCache::new(repo);
+    match cache.get_or_cache(original_url).await {
+        Ok(cdn_url) => cdn_url,
+        Err(e) => {
+            warn!("ImageCache: Failed to cache {}: {}", original_url, e);
+            to_wp_cdn(original_url) // Use WP CDN as graceful fallback
+        }
+    }
+}
+
+/// Batch cache multiple images
+pub async fn cache_image_urls(
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    urls: &[String],
+) -> Vec<String> {
+    let repo = Arc::new(SeaOrmImageCacheRepository::new(db, redis.clone()));
+    let cache = ImageCache::new(repo);
+    let mut results = Vec::with_capacity(urls.len());
+
+    for url in urls {
+        let cdn_url = match cache.get_or_cache(url).await {
+            Ok(u) => u,
+            Err(_) => url.clone(),
+        };
+        results.push(cdn_url);
+    }
+
+    results
+}
+
+/// Helper to convert image URL to CDN URL in background (non-blocking)
+/// Returns original URL immediately and caches in background
+pub fn cache_image_url_lazy(
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    original_url: String,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+) -> String {
+    let db_owned = db;
+    let redis_owned = redis.clone();
+    let url = original_url.clone();
+    let sem_owned = semaphore.clone();
+
+    // Spawn background task to cache
+    tokio::spawn(async move {
+        let repo = Arc::new(SeaOrmImageCacheRepository::new(db_owned, redis_owned));
+        let mut cache = ImageCache::new(repo);
+        if let Some(sem) = sem_owned {
+            cache = cache.with_semaphore(sem);
+        }
+
+        match cache.get_or_cache(&url).await {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    });
+
+    to_wp_cdn(&original_url)
+}
+
+/// Convert image URL to CDN URL if already cached, otherwise return original
+/// and trigger background caching for next request (with duplicate prevention)
+/// Convert image URL to CDN URL if already cached, otherwise return original
+/// and trigger background caching for next request (with duplicate prevention)
+pub async fn get_cached_or_original(
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    original_url: &str,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+) -> String {
+    let repo = Arc::new(SeaOrmImageCacheRepository::new(db.clone(), redis.clone()));
+    let cache = ImageCache::new(repo);
+
+    // Check if already cached (Redis or DB)
+    if let Some(cdn_url) = cache.get_cdn_url(original_url).await {
+        return cdn_url;
+    }
+
+    // Check if currently being cached by another process
+    let lock_key = format!("{}:{}", IMAGE_CACHE_LOCK_PREFIX, url_hash(original_url));
+    let redis_cache = Cache::new(redis);
+    if redis_cache.get::<bool>(&lock_key).await.is_some() {
+        return to_wp_cdn(original_url);
+    }
+
+    // Not cached and not being cached - start background caching
+    let db_owned = db.clone();
+    let redis_owned = redis.clone();
+    let url = original_url.to_string();
+    let sem_owned = semaphore.clone();
+
+    tokio::spawn(async move {
+        let repo = Arc::new(SeaOrmImageCacheRepository::new(db_owned, redis_owned));
+        let mut cache = ImageCache::new(repo);
+        if let Some(sem) = sem_owned {
+            cache = cache.with_semaphore(sem);
+        }
+
+        let _ = cache.get_or_cache(&url).await;
+    });
+
+    to_wp_cdn(original_url)
+}
+
+/// Batch process multiple image URLs - returns original URLs immediately
+/// and triggers background caching for all
+/// Batch process multiple image URLs - checks cache first, returns cached URL if found
+/// For misses: returns original URL and triggers background caching
+pub async fn cache_image_urls_batch_lazy(
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    urls: Vec<String>,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+) -> Vec<String> {
+    if urls.is_empty() {
+        return urls;
+    }
+
+    let mut results = vec![String::new(); urls.len()];
+    let mut missing_indices = Vec::new();
+
+    // 1. Batch check Redis
+    let redis_cache = Cache::new(redis);
+    let cache_keys: Vec<String> = urls
+        .iter()
+        .map(|url| format!("{}:{}", IMAGE_CACHE_PREFIX, url_hash(url)))
+        .collect();
+
+    let cached_values: Vec<Option<String>> = redis_cache.mget(&cache_keys).await;
+
+    for (i, val) in cached_values.iter().enumerate() {
+        if let Some(cdn_url) = val {
+            results[i] = cdn_url.clone();
+        } else {
+            missing_indices.push(i);
+        }
+    }
+
+    // 2. Batch check Database for Redis misses
+    if !missing_indices.is_empty() {
+        let missing_urls: Vec<String> = missing_indices.iter().map(|&i| urls[i].clone()).collect();
+
+        // Note: Using repository for batch check would be better, but keeping it direct for now to match SeaORM usage
+        // but I should probably add a batch method to repository later.
+        use crate::infrastructure::persistence::entities::image_cache;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        match image_cache::Entity::find()
+            .filter(image_cache::Column::OriginalUrl.is_in(missing_urls.clone()))
+            .all(db.as_ref())
+            .await
+        {
+            Ok(db_entries) => {
+                let db_map: std::collections::HashMap<String, String> = db_entries
+                    .into_iter()
+                    .map(|e| (e.original_url, e.cdn_url))
+                    .collect();
+
+                let mut still_missing_indices = Vec::new();
+
+                for &idx in &missing_indices {
+                    let url = &urls[idx];
+                    if let Some(cdn_url) = db_map.get(url) {
+                        results[idx] = cdn_url.clone();
+                        // Put back to Redis
+                        let _ = redis_cache
+                            .set_with_ttl(&cache_keys[idx], cdn_url, IMAGE_CACHE_TTL)
+                            .await;
+                    } else {
+                        // Real miss - return WP CDN proxy and trigger background upload
+                        results[idx] = to_wp_cdn(url);
+                        still_missing_indices.push(idx);
+                    }
+                }
+
+                // 3. Trigger background caching for still missing URLs
+                if !still_missing_indices.is_empty() {
+                    let db_owned = db.clone();
+                    let redis_owned = redis.clone();
+                    let sem_owned = semaphore.clone();
+                    let urls_to_cache: Vec<String> = still_missing_indices
+                        .iter()
+                        .map(|&idx| urls[idx].clone())
+                        .collect();
+
+                    tokio::spawn(async move {
+                        use futures::stream::{self, StreamExt};
+                        let repo = Arc::new(SeaOrmImageCacheRepository::new(db_owned, redis_owned));
+                        let mut cache = ImageCache::new(repo);
+                        if let Some(sem) = sem_owned {
+                            cache = cache.with_semaphore(sem);
+                        }
+
+                        stream::iter(urls_to_cache)
+                            .map(|url| {
+                                let cache_ref = &cache;
+                                async move {
+                                    let _ = cache_ref.get_or_cache(&url).await;
+                                }
+                            })
+                            .buffer_unordered(20)
+                            .collect::<Vec<_>>()
+                            .await;
+                    });
+                }
+            }
+            Err(e) => {
+                error!("ImageCache: Batch DB check failed: {}", e);
+                for &idx in &missing_indices {
+                    results[idx] = to_wp_cdn(&urls[idx]);
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Apply cached CDN poster URLs to a collection of items using the HasPoster trait.
+pub async fn apply_cached_posters<T: crate::domain::entity::anime::HasPoster>(
+    items: &mut [T],
+    db: Arc<DatabaseConnection>,
+    redis: &RedisPool,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+) {
+    let posters: Vec<String> = items.iter().map(|item| item.poster().to_string()).collect();
+    let cached = cache_image_urls_batch_lazy(db, redis, posters, semaphore).await;
+    for (i, item) in items.iter_mut().enumerate() {
+        if let Some(url) = cached.get(i) {
+            item.set_poster(url.clone());
+        }
+    }
+}

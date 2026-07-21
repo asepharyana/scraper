@@ -1,10 +1,30 @@
-// Library root - clean organized module structure
-// All modules organized into logical folders
+// Library root — clean architecture module structure
 
 // ============================================================================
-// Core Framework
+// Domain Layer — pure business logic, no framework dependencies
 // ============================================================================
-pub mod app;
+pub mod domain;
+
+// ============================================================================
+// Application Layer — use cases / business orchestration
+// ============================================================================
+pub mod application;
+
+// ============================================================================
+// Infrastructure Layer — implements domain ports
+// ============================================================================
+pub mod infrastructure;
+
+// ============================================================================
+// Presentation Layer — Axum handlers, DTOs, state, middleware
+// ============================================================================
+pub mod presentation;
+
+// ============================================================================
+// Core Framework & Infrastructure
+// ============================================================================
 pub mod bootstrap;
-pub mod modules;
-pub mod shared;
+pub mod config;
+pub mod events;
+pub mod observability;
+pub mod scheduler;

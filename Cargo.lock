@@ -3347,7 +3347,6 @@ dependencies = [
  "itertools",
  "log",
  "mime_guess",
- "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",

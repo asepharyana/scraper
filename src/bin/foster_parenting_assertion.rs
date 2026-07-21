@@ -6,7 +6,7 @@
 /// Uses shared fixture: src/bin/test_fixtures/foster_parenting_minimal.html
 /// Uses shared parser: src/helpers::parse_html()
 use scraper::Selector;
-use scraper_service::shared::utils::parse_html;
+use scraper_service::infrastructure::scraping::parsing_utils::parse_html;
 use std::fs;
 
 fn main() {

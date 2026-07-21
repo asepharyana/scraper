@@ -1,5 +1,5 @@
 use scraper::Selector;
-use scraper_service::shared::utils::parse_html;
+use scraper_service::infrastructure::scraping::parsing_utils::parse_html;
 /// Capture html5ever tree_builder warning evidence by parsing problematic HTML.
 ///
 /// Build with: cargo build --bin capture_warning
