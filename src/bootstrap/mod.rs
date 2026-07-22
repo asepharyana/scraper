@@ -62,7 +62,8 @@ impl Application {
             .max_lifetime(std::time::Duration::from_secs(
                 CONFIG.db.max_lifetime_seconds,
             ))
-            .sqlx_logging(CONFIG.log_level == "debug");
+            .sqlx_logging(CONFIG.log_level == "debug")
+            .map_sqlx_postgres_opts(|opts| opts.extra_float_digits(None));
 
         let db = Database::connect(opt)
             .await
