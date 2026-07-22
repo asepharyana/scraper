@@ -77,6 +77,14 @@ unused_variables = "deny"
 unused_imports = "deny"
 unused_must_use = "deny"
 dead_code = "deny"
+unused_mut = "deny"
+unreachable_code = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+explicit_outlives_requirements = "deny"
+unused_labels = "deny"
+unused_braces = "deny"
+noop_method_call = "deny"
 
 [lints.clippy]
 unwrap_used = "warn"
@@ -84,6 +92,7 @@ expect_used = "warn"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
+unnecessary_to_owned = "deny"
 
 [features]
 # default = ["ffmpeg"]
