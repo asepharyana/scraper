@@ -33,7 +33,7 @@ Request → Router (route.rs) → Controller → Service → Repository → Pars
                                                     │
                                                     ├── Redis (L1 cache)
                                                     ├── SeaORM/MySQL (L2, image_cache)
-                                                    └── External HTTP (alqanime.si, picser CDN)
+                                                    └── External HTTP (alqanime.net, picser CDN)
 ```
 
 ### Directory Layout
