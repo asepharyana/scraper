@@ -330,29 +330,14 @@ impl Anime2UseCases {
         self.cache()
             .get_or_set(&cache_key, DETAIL_CACHE_TTL, || async {
                 let detail_url = self.repository.detail_url(&slug);
-                let image_url = self.repository.detail_image_url(&slug);
-                let (detail_html, image_html) = tokio::join!(
-                    self.repository.fetch_html(&detail_url),
-                    self.repository.fetch_html(&image_url)
-                );
-                let detail_html = detail_html.map_err(|e| e.to_string())?;
-                let image_html = image_html.ok();
+                let detail_html = self
+                    .repository
+                    .fetch_html(&detail_url)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                 let mut data = tokio::task::spawn_blocking(move || {
-                    let mut data =
-                        parser::parse_anime_detail(&detail_html).map_err(|e| e.to_string())?;
-                    if let Some(image_html) = image_html {
-                        if let Ok(image_data) = parser::parse_anime_detail(&image_html) {
-                            if !image_data.poster.is_empty() {
-                                data.poster = image_data.poster;
-                            }
-                            if !image_data.poster2.is_empty() {
-                                data.poster2 = image_data.poster2;
-                            }
-                            data.recommendations = image_data.recommendations;
-                        }
-                    }
-                    Ok::<_, String>(data)
+                    parser::parse_anime_detail(&detail_html).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
@@ -372,7 +357,6 @@ impl Anime2UseCases {
                 )
                 .await;
 
-                // Recommendation in modules::anime2::types implements HasPoster
                 apply_cached_posters(
                     &mut data.recommendations,
                     self.db.clone(),

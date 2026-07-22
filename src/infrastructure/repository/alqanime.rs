@@ -7,8 +7,7 @@ use crate::domain::error::ScrapingError;
 use crate::domain::repository::ScrapingRepository;
 use crate::infrastructure::scraping::proxy_fetch::fetch_with_proxy_only;
 
-const BASE_URL: &str = "https://alqanime.si";
-const BASE_DETAIL_URL: &str = "https://alqanime.net";
+const BASE_URL: &str = "https://alqanime.net";
 
 pub struct AlqanimeRepository;
 
@@ -38,11 +37,7 @@ impl AlqanimeRepository {
     }
 
     pub fn detail_url(&self, slug: &str) -> String {
-        format!("{}/{}/", BASE_DETAIL_URL, slug)
-    }
-
-    pub fn detail_image_url(&self, slug: &str) -> String {
-        format!("{}/anime/{}/", BASE_URL, slug)
+        format!("{}/{}/", BASE_URL, slug)
     }
 
     pub fn genre_page_url(&self, genre_slug: &str, page: u32) -> String {
