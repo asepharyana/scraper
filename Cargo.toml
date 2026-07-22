@@ -76,6 +76,7 @@ unsafe_code = "forbid"
 unused_variables = "deny"
 unused_imports = "deny"
 unused_must_use = "deny"
+dead_code = "deny"
 
 [lints.clippy]
 unwrap_used = "warn"
