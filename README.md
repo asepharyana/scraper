@@ -29,7 +29,6 @@ Optional yang sering dipakai:
 
 ```env
 RUST_LOG=info
-EXTERNAL_BROWSERLESS_WS=
 MINIO_ENDPOINT=
 MINIO_BUCKET_NAME=
 MINIO_ACCESS_KEY=

@@ -46,14 +46,6 @@ impl Application {
         // Redis
         let _ = get_redis_conn().await;
 
-        // Browser Pool
-        tracing::info!("Initializing browser pool...");
-        let browser_config = crate::infrastructure::browser::BrowserPoolConfig::default();
-        match crate::infrastructure::browser::pool::init_browser_pool(browser_config).await {
-            Ok(_) => tracing::info!("✓ Browser pool initialized"),
-            Err(e) => tracing::error!("⚠️ Failed to initialize browser pool: {}", e),
-        }
-
         // Database
         let mut opt = sea_orm::ConnectOptions::new(CONFIG.database_url.clone());
         opt.max_connections(20)

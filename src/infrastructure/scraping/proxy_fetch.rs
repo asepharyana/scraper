@@ -289,20 +289,10 @@ pub async fn fetch_with_proxy_only(slug: &str) -> Result<FetchResult, AppError> 
 }
 
 async fn perform_proxy_chain(slug: &str) -> Result<FetchResult, AppError> {
-    // 1. Try Relays
     match fetch_via_relays(slug).await {
-        Ok(res) => return Ok(res),
-        Err(e) => warn!("[ProxyChain] All relays failed for {}: {:?}", slug, e),
-    }
-
-    // 2. Try Browserless as absolute last resort
-    match fetch_via_browserless(slug).await {
         Ok(res) => Ok(res),
         Err(e) => {
-            error!(
-                "[ProxyChain] Browserless fallback failed for {}: {:?}",
-                slug, e
-            );
+            error!("[ProxyChain] All relays failed for {}: {:?}", slug, e);
             Err(e)
         }
     }
@@ -362,38 +352,4 @@ async fn fetch_via_relays(slug: &str) -> Result<FetchResult, AppError> {
     }
 
     Err(AppError::Internal("All relay endpoints failed".to_string()))
-}
-
-async fn fetch_via_browserless(slug: &str) -> Result<FetchResult, AppError> {
-    use crate::infrastructure::browser::pool::get_browser_pool;
-
-    warn!("[Browserless] Falling back to remote browser for {}", slug);
-
-    let pool = get_browser_pool()
-        .ok_or_else(|| AppError::Internal("Browser pool not initialized".to_string()))?;
-
-    let tab = pool
-        .get_tab()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to get browser tab: {:?}", e)))?;
-
-    tab.goto(slug).await.map_err(|e| {
-        AppError::Internal(format!("Browser navigation failed for {}: {:?}", slug, e))
-    })?;
-
-    let data = tab
-        .content()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to get browser content: {:?}", e)))?;
-
-    let result = FetchResult {
-        data,
-        content_type: Some("text/html".to_string()),
-    };
-
-    if let Err(e) = set_cached_fetch(slug, &result).await {
-        warn!("Failed to cache browserless result for {}: {:?}", slug, e);
-    }
-
-    Ok(result)
 }

@@ -94,7 +94,7 @@ impl ScrapingRepository for AlqanimeRepository {
             .await
             .map_err(|e| ScrapingError::Http(format!("Alqanime fetch failed: {}", e)))?;
         if response.data.trim().is_empty() {
-            warn!("Alqanime browserless fetch returned empty body for {}", url);
+            warn!("Alqanime fetch returned empty body for {}", url);
         }
         Ok(response.data)
     }
