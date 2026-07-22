@@ -9,6 +9,16 @@ use crate::infrastructure::scraping::parsing_utils::{
     attr, extract_slug, selector, text, text_from_or,
 };
 
+/// An episode entry from the detail page episode list.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, Debug, Clone)]
+pub struct AlqEpisode {
+    pub episode: String,
+    pub title: String,
+    pub url: String,
+    pub date: String,
+    pub download_url: Option<String>,
+}
+
 /// Parser-specific types for Alqanime detail data
 #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, Debug, Clone)]
 pub struct AlqLink {
@@ -61,6 +71,7 @@ pub struct AlqDetailData {
     pub batch: Vec<AlqDownloadItem>,
     pub ova: Vec<AlqDownloadItem>,
     pub downloads: Vec<AlqDownloadItem>,
+    pub episodes: Vec<AlqEpisode>,
 }
 
 static ITEM_SELECTOR: LazyLock<Selector> = LazyLock::new(|| Selector::parse("article.bs").unwrap());
@@ -76,6 +87,16 @@ static NEXT_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".pagination .next").unwrap());
 static SLUG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/([^/]+)/?$").unwrap());
 static GENRE_SLUG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"genre-(.+)$").unwrap());
+static EPISODE_LIST_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".eplister ul li").unwrap());
+static EP_NUM_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".epl-num").unwrap());
+static EP_TITLE_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".epl-title").unwrap());
+static EP_DATE_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".epl-date").unwrap());
+static EP_DOWNLOAD_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(r#"a[rel="nofollow"][aria-label="Download"]"#).unwrap());
 pub fn parse_ongoing_anime(html: &str) -> Result<Vec<OngoingAnimeItem>, ScrapingError> {
     let items = parse_ongoing_anime_with_score(html)?;
     Ok(items
@@ -556,6 +577,48 @@ pub fn parse_pagination_with_string(
     Ok(pagination)
 }
 
+/// Parse episode list from the detail page's `.eplister` section.
+pub fn parse_episode_list(html: &str) -> Result<Vec<AlqEpisode>, ScrapingError> {
+    let document = parse_html(html);
+    let mut episodes = Vec::new();
+
+    for element in document.select(&EPISODE_LIST_SELECTOR) {
+        let episode = text_from_or(&element, &EP_NUM_SELECTOR, "");
+        let title = text_from_or(&element, &EP_TITLE_SELECTOR, "");
+        let date = text_from_or(&element, &EP_DATE_SELECTOR, "");
+        let url = element
+            .select(&LINK_SELECTOR)
+            .next()
+            .and_then(|e| e.value().attr("href"))
+            .unwrap_or("")
+            .to_string();
+
+        if !title.is_empty() {
+            episodes.push(AlqEpisode {
+                episode,
+                title,
+                url,
+                date,
+                download_url: None,
+            });
+        }
+    }
+
+    Ok(episodes)
+}
+
+/// Parse download URL from an individual episode page.
+pub fn parse_episode_download(html: &str) -> Result<Option<String>, ScrapingError> {
+    let document = parse_html(html);
+    let download_url = document
+        .select(&EP_DOWNLOAD_SELECTOR)
+        .next()
+        .and_then(|e| e.value().attr("href"))
+        .map(|s| s.to_string());
+
+    Ok(download_url)
+}
+
 pub fn parse_anime_detail(html: &str) -> Result<AlqDetailData, ScrapingError> {
     let document = parse_html(html);
 
@@ -748,6 +811,8 @@ pub fn parse_anime_detail(html: &str) -> Result<AlqDetailData, ScrapingError> {
         });
     }
 
+    let episodes = parse_episode_list(html).unwrap_or_default();
+
     Ok(AlqDetailData {
         title,
         alternative_title,
@@ -764,6 +829,7 @@ pub fn parse_anime_detail(html: &str) -> Result<AlqDetailData, ScrapingError> {
         batch,
         ova,
         downloads,
+        episodes,
     })
 }
 

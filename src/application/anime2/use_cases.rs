@@ -37,7 +37,7 @@ pub use crate::domain::entity::anime::{
     SearchAnimeItem as Anime2SearchItem,
 };
 pub use crate::infrastructure::repository::parsers::alqanime_parser::{
-    AlqDetailData, AlqDownloadItem, AlqLink, AlqRecommendation,
+    AlqDetailData, AlqDownloadItem, AlqEpisode, AlqLink, AlqRecommendation,
 };
 
 use serde::{Deserialize, Serialize};
@@ -341,6 +341,38 @@ impl Anime2UseCases {
                 })
                 .await
                 .map_err(|e| e.to_string())??;
+
+                // Fetch download URLs for the latest episodes
+                let episodes = &mut data.episodes;
+                if !episodes.is_empty() {
+                    // Limit to latest 5 episodes to keep things fast
+                    let latest: Vec<_> = episodes
+                        .iter_mut()
+                        .take(5)
+                        .map(|ep| ep.url.clone())
+                        .collect();
+
+                    let results: Vec<_> = futures::future::join_all(latest.iter().map(|url| {
+                        self.repository.fetch_html(url)
+                    }))
+                    .await;
+
+                    for (i, result) in results.into_iter().enumerate() {
+                        if let Ok(html) = result {
+                            if let Ok(Some(dl_url)) =
+                                tokio::task::spawn_blocking(move || {
+                                    parser::parse_episode_download(&html)
+                                })
+                                .await
+                                .unwrap_or(Ok(None))
+                            {
+                                if let Some(ep) = episodes.get_mut(i) {
+                                    ep.download_url = Some(dl_url);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 data.poster = get_cached_or_original(
                     self.db.clone(),
