@@ -13,7 +13,7 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: MythEclipse/ultimate-asepharyana.tech
+          repository: asepharyana/asepharyana-hub
           event-type: submodule-updated
           client-payload: |
             {
