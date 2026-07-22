@@ -8,23 +8,17 @@
 //! TODO: Once parsers return domain types, replace shared types with
 //!       `crate::domain::entity::anime::{GenreAnimeItem, SearchAnimeItem, LatestAnimeItem}`.
 
-use std::sync::Arc;
-
 use deadpool_redis::Pool;
-use sea_orm::DatabaseConnection;
 
 use crate::domain::error::*;
 use crate::domain::repository::ScrapingRepository;
 use crate::infrastructure::cache::redis::Cache;
 use crate::infrastructure::repository::AlqanimeRepository;
-use crate::infrastructure::services::images::cache::{
-    apply_cached_posters, cache_image_urls_batch_lazy, get_cached_or_original,
-};
 
 use crate::infrastructure::repository::parsers::alqanime_parser as parser;
 
 use crate::domain::entity::anime::{
-    CompleteAnimeItem, FilterAnimeItem, Genre, GenreAnimeItem, HasPoster, LatestAnimeItem,
+    CompleteAnimeItem, FilterAnimeItem, Genre, GenreAnimeItem, LatestAnimeItem,
     OngoingAnimeItemWithScore, Pagination, SearchAnimeItem,
 };
 
@@ -54,15 +48,6 @@ pub struct Anime2Item {
     pub r#type: String,
     pub score: String,
     pub anime_url: String,
-}
-
-impl HasPoster for Anime2Item {
-    fn poster(&self) -> &str {
-        &self.poster
-    }
-    fn set_poster(&mut self, url: String) {
-        self.poster = url;
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
@@ -123,22 +108,13 @@ const COMPLETE_CACHE_TTL: u64 = 300;
 pub struct Anime2UseCases {
     repository: AlqanimeRepository,
     redis_pool: Pool,
-    db: Arc<DatabaseConnection>,
-    semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Anime2UseCases {
-    pub fn new(
-        repository: AlqanimeRepository,
-        redis_pool: Pool,
-        db: Arc<DatabaseConnection>,
-        semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    ) -> Self {
+    pub fn new(repository: AlqanimeRepository, redis_pool: Pool) -> Self {
         Self {
             repository,
             redis_pool,
-            db,
-            semaphore,
         }
     }
 
@@ -168,7 +144,7 @@ impl Anime2UseCases {
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-                let mut ongoing: Vec<Anime2Item> = data
+                let ongoing: Vec<Anime2Item> = data
                     .0
                     .into_iter()
                     .map(|item| Anime2Item {
@@ -182,7 +158,7 @@ impl Anime2UseCases {
                     })
                     .collect();
 
-                let mut complete: Vec<Anime2Item> = data
+                let complete: Vec<Anime2Item> = data
                     .1
                     .into_iter()
                     .map(|item| Anime2Item {
@@ -195,30 +171,6 @@ impl Anime2UseCases {
                         anime_url: item.anime_url,
                     })
                     .collect();
-
-                let mut posters: Vec<String> =
-                    ongoing.iter().map(|item| item.poster.clone()).collect();
-                posters.extend(complete.iter().map(|item| item.poster.clone()));
-
-                let cached_posters = cache_image_urls_batch_lazy(
-                    self.db.clone(),
-                    &self.redis_pool,
-                    posters,
-                    self.semaphore.clone(),
-                )
-                .await;
-
-                let ongoing_len = ongoing.len();
-                for (i, item) in ongoing.iter_mut().enumerate() {
-                    if let Some(url) = cached_posters.get(i) {
-                        item.poster = url.clone();
-                    }
-                }
-                for (i, item) in complete.iter_mut().enumerate() {
-                    if let Some(url) = cached_posters.get(ongoing_len + i) {
-                        item.poster = url.clone();
-                    }
-                }
 
                 Ok(Anime2Response {
                     status: "Ok".to_string(),
@@ -293,19 +245,11 @@ impl Anime2UseCases {
                     .fetch_html(&url)
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, pagination) = tokio::task::spawn_blocking(move || {
+                let (data, pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_filter_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(FilterResponse {
                     success: true,
@@ -374,29 +318,6 @@ impl Anime2UseCases {
                     }
                 }
 
-                data.poster = get_cached_or_original(
-                    self.db.clone(),
-                    &self.redis_pool,
-                    &data.poster,
-                    self.semaphore.clone(),
-                )
-                .await;
-                data.poster2 = get_cached_or_original(
-                    self.db.clone(),
-                    &self.redis_pool,
-                    &data.poster2,
-                    self.semaphore.clone(),
-                )
-                .await;
-
-                apply_cached_posters(
-                    &mut data.recommendations,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
-
                 Ok(DetailResponse {
                     status: "Ok".to_string(),
                     data,
@@ -420,19 +341,11 @@ impl Anime2UseCases {
                     .fetch_html(&self.repository.genre_page_url(&genre_slug, page))
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, _pagination) = tokio::task::spawn_blocking(move || {
+                let (data, _pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_genre_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(ApiResponse::success(data))
             })
@@ -454,19 +367,11 @@ impl Anime2UseCases {
                     .fetch_html(&self.repository.search_url(&query, page))
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, _pagination) = tokio::task::spawn_blocking(move || {
+                let (data, _pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_search_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(ApiResponse::success(data))
             })
@@ -487,19 +392,11 @@ impl Anime2UseCases {
                     .fetch_html(&self.repository.latest_url(page))
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, _pagination) = tokio::task::spawn_blocking(move || {
+                let (data, _pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_latest_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(ApiResponse::success(data))
             })
@@ -520,19 +417,11 @@ impl Anime2UseCases {
                     .fetch_html(&self.repository.ongoing_url(page))
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, _pagination) = tokio::task::spawn_blocking(move || {
+                let (data, _pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_ongoing_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(ApiResponse::success(data))
             })
@@ -553,19 +442,11 @@ impl Anime2UseCases {
                     .fetch_html(&self.repository.complete_url(page))
                     .await
                     .map_err(|e| e.to_string())?;
-                let (mut data, _pagination) = tokio::task::spawn_blocking(move || {
+                let (data, _pagination) = tokio::task::spawn_blocking(move || {
                     parser::parse_complete_page(&html, page).map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| e.to_string())??;
-
-                apply_cached_posters(
-                    &mut data,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(ApiResponse::success(data))
             })

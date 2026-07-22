@@ -25,12 +25,7 @@ use crate::presentation::state::AppState;
 // ============================================================================
 
 fn make_use_cases(state: &Arc<AppState>) -> KomikUseCases {
-    KomikUseCases::new(
-        KomikRepository::new(),
-        state.redis_pool.clone(),
-        state.db.clone(),
-        Some(state.image_processing_semaphore.clone()),
-    )
+    KomikUseCases::new(KomikRepository::new(), state.redis_pool.clone())
 }
 
 // ============================================================================

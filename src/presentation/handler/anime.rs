@@ -78,12 +78,7 @@ pub struct GenreListResponse {
 // ============================================================================
 
 fn make_use_cases(state: &Arc<AppState>) -> AnimeUseCases {
-    AnimeUseCases::new(
-        OtakudesuRepository::new(),
-        state.redis_pool.clone(),
-        state.db.clone(),
-        Some(state.image_processing_semaphore.clone()),
-    )
+    AnimeUseCases::new(OtakudesuRepository::new(), state.redis_pool.clone())
 }
 
 // ============================================================================

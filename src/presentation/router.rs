@@ -154,18 +154,7 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::komik::search_slug_page),
         )
         // Proxy routes
-        .route(
-            "/api/proxy/croxy",
-            axum::routing::get(crate::presentation::handler::proxy::fetch_with_proxy_only),
-        )
-        .route(
-            "/api/proxy/image-cache",
-            axum::routing::post(crate::presentation::handler::proxy::image_cache),
-        )
-        .route(
-            "/api/proxy/image-cache/audit",
-            axum::routing::post(crate::presentation::handler::proxy::audit_image_cache),
-        )
+        // (all proxy routes removed)
         // Health
         .route(
             "/health",

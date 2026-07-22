@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::domain::entity::anime::HasPoster;
-
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct KomikGenre {
     pub name: String,
@@ -52,13 +50,4 @@ pub struct KomikItem {
     pub score: String,
     pub r#type: String,
     pub komik_url: String,
-}
-
-impl HasPoster for KomikItem {
-    fn poster(&self) -> &str {
-        &self.poster
-    }
-    fn set_poster(&mut self, url: String) {
-        self.poster = url;
-    }
 }

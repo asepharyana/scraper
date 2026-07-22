@@ -77,26 +77,15 @@ impl Application {
 
         // App State components
         let db_arc = Arc::new(db);
-        let image_processing_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            CONFIG.image_processing_concurrency,
-        ));
         let event_bus = Arc::new(crate::events::bus::EventBus::new());
 
         let redis_pool = crate::infrastructure::cache::redis_pool::redis_pool()
             .map_err(|e| anyhow::anyhow!("Failed to init Redis pool: {}", e))?;
 
-        use crate::infrastructure::repository::SeaOrmImageCacheRepository;
-        let image_cache_repo = Arc::new(SeaOrmImageCacheRepository::new(
-            db_arc.clone(),
-            redis_pool.clone(),
-        ));
-
         let app_state = Arc::new(AppState {
             redis_pool,
             db: db_arc.clone(),
-            image_processing_semaphore,
             event_bus: event_bus.clone(),
-            image_cache_repo,
         });
 
         let app = crate::presentation::router::build_router(app_state.clone())?;

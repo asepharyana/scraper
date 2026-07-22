@@ -47,10 +47,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub db: DbConfig,
 
-    /// Max concurrent image processing tasks
-    #[serde(default = "default_image_processing_concurrency")]
-    pub image_processing_concurrency: usize,
-
     /// Domain/URL values that may change between deployments
     #[serde(default)]
     pub urls: UrlConfig,
@@ -60,18 +56,12 @@ pub struct AppConfig {
 pub struct UrlConfig {
     #[serde(default = "default_site_url")]
     pub site_url: String,
-    #[serde(default = "default_picser_api_url")]
-    pub picser_api_url: String,
-    #[serde(default = "default_fallback_upload_api_url")]
-    pub fallback_upload_api_url: String,
 }
 
 impl Default for UrlConfig {
     fn default() -> Self {
         Self {
             site_url: default_site_url(),
-            picser_api_url: default_picser_api_url(),
-            fallback_upload_api_url: default_fallback_upload_api_url(),
         }
     }
 }
@@ -181,20 +171,8 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_image_processing_concurrency() -> usize {
-    5
-}
-
 fn default_site_url() -> String {
     "https://asepharyana.my.id".to_string()
-}
-
-fn default_picser_api_url() -> String {
-    "https://picser.asepharyana.my.id/api/upload".to_string()
-}
-
-fn default_fallback_upload_api_url() -> String {
-    "https://upload.asepharyana.my.id/api/upload".to_string()
 }
 
 fn default_db_max_connections() -> u32 {

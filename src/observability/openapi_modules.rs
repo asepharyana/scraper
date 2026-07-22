@@ -41,8 +41,6 @@ use utoipa::OpenApi;
         crate::presentation::handler::komik::search_slug,
         crate::presentation::handler::komik::search_slug_page,
         // Proxy module handlers
-        crate::presentation::handler::proxy::fetch_with_proxy_only,
-        crate::presentation::handler::proxy::image_cache,
     ),
     components(
         schemas(

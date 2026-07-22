@@ -6,10 +6,7 @@
 //!       `crate::infrastructure::repository::parsers::komik_parser`.
 //! TODO: Move response DTOs to `crate::presentation::dto::komik`.
 
-use std::sync::Arc;
-
 use deadpool_redis::Pool;
-use sea_orm::DatabaseConnection;
 
 use crate::domain::entity::anime::Pagination;
 use crate::domain::entity::komik::{ChapterData, DetailData, KomikGenre, KomikItem};
@@ -17,9 +14,6 @@ use crate::domain::error::*;
 use crate::domain::repository::ScrapingRepository;
 use crate::infrastructure::cache::redis::Cache;
 use crate::infrastructure::repository::KomikRepository;
-use crate::infrastructure::services::images::cache::{
-    apply_cached_posters, cache_image_urls_batch_lazy, get_cached_or_original,
-};
 
 use crate::infrastructure::repository::parsers::komik_parser as parser;
 
@@ -36,22 +30,13 @@ const SEARCH_CACHE_TTL: u64 = 300;
 pub struct KomikUseCases {
     repository: KomikRepository,
     redis_pool: Pool,
-    db: Arc<DatabaseConnection>,
-    semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl KomikUseCases {
-    pub fn new(
-        repository: KomikRepository,
-        redis_pool: Pool,
-        db: Arc<DatabaseConnection>,
-        semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    ) -> Self {
+    pub fn new(repository: KomikRepository, redis_pool: Pool) -> Self {
         Self {
             repository,
             redis_pool,
-            db,
-            semaphore,
         }
     }
 
@@ -94,19 +79,11 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let (mut komik_list, pagination) =
+                let (komik_list, pagination) =
                     tokio::task::spawn_blocking(move || parser::parse_genre_page(&html, page))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-
-                apply_cached_posters(
-                    &mut komik_list,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok((komik_list, pagination))
             })
@@ -130,19 +107,11 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let (mut komik_list, pagination) =
+                let (komik_list, pagination) =
                     tokio::task::spawn_blocking(move || parser::parse_genre_page(&html, page))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-
-                apply_cached_posters(
-                    &mut komik_list,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok((komik_list, pagination))
             })
@@ -162,21 +131,11 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let mut data =
+                let data =
                     tokio::task::spawn_blocking(move || parser::parse_komik_detail_document(&html))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-
-                if !data.poster.is_empty() {
-                    data.poster = get_cached_or_original(
-                        self.db.clone(),
-                        &self.redis_pool,
-                        &data.poster,
-                        self.semaphore.clone(),
-                    )
-                    .await;
-                }
 
                 Ok(data)
             })
@@ -196,21 +155,13 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let mut data = tokio::task::spawn_blocking({
+                let data = tokio::task::spawn_blocking({
                     let chapter_url = chapter_url.clone();
                     move || parser::parse_komik_chapter_document(&html, &chapter_url)
                 })
                 .await
                 .map_err(|e| e.to_string())?
                 .map_err(|e| e.to_string())?;
-
-                data.images = cache_image_urls_batch_lazy(
-                    self.db.clone(),
-                    &self.redis_pool,
-                    data.images,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok(data)
             })
@@ -278,7 +229,7 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let (mut komik_list, pagination) =
+                let (komik_list, pagination) =
                     tokio::task::spawn_blocking(move || parser::parse_genre_page(&html, page))
                         .await
                         .map_err(|e| e.to_string())?
@@ -287,14 +238,6 @@ impl KomikUseCases {
                 if komik_list.is_empty() {
                     return Err(format!("Empty komik {} page {}", list_name, page));
                 }
-
-                apply_cached_posters(
-                    &mut komik_list,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok((komik_list, pagination))
             })
@@ -318,19 +261,11 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let (mut komik_list, pagination) =
+                let (komik_list, pagination) =
                     tokio::task::spawn_blocking(move || parser::parse_genre_page(&html, page))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-
-                apply_cached_posters(
-                    &mut komik_list,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok((komik_list, pagination))
             })
@@ -354,19 +289,11 @@ impl KomikUseCases {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let (mut komik_list, pagination) =
+                let (komik_list, pagination) =
                     tokio::task::spawn_blocking(move || parser::parse_genre_page(&html, page))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-
-                apply_cached_posters(
-                    &mut komik_list,
-                    self.db.clone(),
-                    &self.redis_pool,
-                    self.semaphore.clone(),
-                )
-                .await;
 
                 Ok((komik_list, pagination))
             })

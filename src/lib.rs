@@ -27,4 +27,3 @@ pub mod bootstrap;
 pub mod config;
 pub mod events;
 pub mod observability;
-pub mod scheduler;

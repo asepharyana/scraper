@@ -39,12 +39,7 @@ pub struct FilterQuery {
 // ============================================================================
 
 fn make_use_cases(state: &Arc<AppState>) -> Anime2UseCases {
-    Anime2UseCases::new(
-        AlqanimeRepository::new(),
-        state.redis_pool.clone(),
-        state.db.clone(),
-        Some(state.image_processing_semaphore.clone()),
-    )
+    Anime2UseCases::new(AlqanimeRepository::new(), state.redis_pool.clone())
 }
 
 // ============================================================================

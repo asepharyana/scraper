@@ -1,7 +1,7 @@
 use crate::domain::entity::anime::{
-    CompleteAnimeItem, DetailGenre, FilterAnimeItem, Genre, GenreAnimeItem, HasPoster,
-    LatestAnimeItem, OngoingAnimeItem, OngoingAnimeItemWithScore, Pagination,
-    PaginationWithStringPages, SearchAnimeItem,
+    CompleteAnimeItem, DetailGenre, FilterAnimeItem, Genre, GenreAnimeItem, LatestAnimeItem,
+    OngoingAnimeItem, OngoingAnimeItemWithScore, Pagination, PaginationWithStringPages,
+    SearchAnimeItem,
 };
 use crate::domain::error::ScrapingError;
 use crate::infrastructure::scraping::parsing_utils::parse_html;
@@ -39,15 +39,6 @@ pub struct AlqRecommendation {
     pub poster: String,
     pub status: String,
     pub r#type: String,
-}
-
-impl HasPoster for AlqRecommendation {
-    fn poster(&self) -> &str {
-        &self.poster
-    }
-    fn set_poster(&mut self, url: String) {
-        self.poster = url;
-    }
 }
 
 use regex::Regex;
