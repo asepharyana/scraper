@@ -36,41 +36,44 @@ pub fn init_otel_metrics() {
         return;
     }
 
-    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".into());
+    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT");
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "scraper-api".into());
-    let export_interval_ms: u64 = std::env::var("OTEL_METRICS_EXPORT_INTERVAL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5000);
 
-    // Build the gRPC OTLP exporter
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .with_endpoint(otel_endpoint.clone())
-        .build()
-        .expect("Failed to create OTLP metric exporter");
+    let m = if let Ok(endpoint) = otel_endpoint {
+        let export_interval_ms: u64 = std::env::var("OTEL_METRICS_EXPORT_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000);
 
-    let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_interval(std::time::Duration::from_millis(export_interval_ms))
-        .build();
+        // Build the gRPC OTLP exporter
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.clone())
+            .build()
+            .expect("Failed to create OTLP metric exporter");
 
-    let resource = Resource::new(vec![KeyValue::new("service.name", service_name.clone())]);
+        let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio)
+            .with_interval(std::time::Duration::from_millis(export_interval_ms))
+            .build();
 
-    let provider = MeterProviderBuilder::default()
-        .with_resource(resource)
-        .with_reader(reader)
-        .build();
+        let resource = Resource::new(vec![KeyValue::new("service.name", service_name.clone())]);
 
-    // Keep a handle so we can shut it down later
-    let _ = PROVIDER.set(provider.clone());
+        let provider = MeterProviderBuilder::default()
+            .with_resource(resource)
+            .with_reader(reader)
+            .build();
 
-    global::set_meter_provider(provider);
+        let _ = PROVIDER.set(provider.clone());
+        global::set_meter_provider(provider);
 
-    let m = global::meter("scraper-http-server");
+        tracing::info!(otel_endpoint = %endpoint, service_name, "OTel metrics initialized");
+        global::meter("scraper-http-server")
+    } else {
+        tracing::info!("OTEL_EXPORTER_OTLP_ENDPOINT not set — metrics disabled");
+        global::meter("scraper-http-server")
+    };
+
     let _ = METER.set(m);
-
-    tracing::info!(otel_endpoint, service_name, "OTel metrics initialized");
 }
 
 /// Shut down the global MeterProvider, flushing pending exports.
