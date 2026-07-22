@@ -5,9 +5,9 @@ use tracing::warn;
 
 use crate::domain::error::ScrapingError;
 use crate::domain::repository::ScrapingRepository;
-use crate::infrastructure::scraping::proxy_fetch::fetch_with_proxy_only;
+use crate::infrastructure::scraping::proxy_fetch::fetch_with_proxy;
 
-const BASE_URL: &str = "https://alqanime.net";
+const BASE_URL: &str = "https://alqanime.si";
 
 pub struct AlqanimeRepository;
 
@@ -37,7 +37,7 @@ impl AlqanimeRepository {
     }
 
     pub fn detail_url(&self, slug: &str) -> String {
-        format!("{}/{}/", BASE_URL, slug)
+        format!("{}/anime/{}/", BASE_URL, slug)
     }
 
     pub fn genre_page_url(&self, genre_slug: &str, page: u32) -> String {
@@ -85,7 +85,7 @@ impl AlqanimeRepository {
 #[async_trait]
 impl ScrapingRepository for AlqanimeRepository {
     async fn fetch_html(&self, url: &str) -> Result<String, ScrapingError> {
-        let response = fetch_with_proxy_only(url)
+        let response = fetch_with_proxy(url)
             .await
             .map_err(|e| ScrapingError::Http(format!("Alqanime fetch failed: {}", e)))?;
         if response.data.trim().is_empty() {
