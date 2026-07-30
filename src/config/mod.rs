@@ -32,8 +32,8 @@ pub struct AppConfig {
     #[serde(default = "default_env")]
     pub environment: String,
 
-    /// Allowed CORS origins (comma-separated)
-    #[serde(default)]
+    /// Allowed CORS origins (comma-separated in env var, parsed to Vec)
+    #[serde(default, deserialize_with = "deserialize_comma_separated")]
     pub cors_origins: Vec<String>,
 
     /// Log level (trace, debug, info, warn, error)
@@ -175,6 +175,19 @@ fn default_site_url() -> String {
     "https://asepharyana.my.id".to_string()
 }
 
+/// Deserialize a comma-separated string into a Vec<String>.
+/// Used for fields like cors_origins that come from a single env var.
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(s.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
 fn default_db_max_connections() -> u32 {
     100
 }
@@ -223,8 +236,7 @@ impl AppConfig {
             .add_source(
                 Environment::with_prefix("APP")
                     .separator("__")
-                    .try_parsing(true)
-                    .list_separator(","),
+                    .try_parsing(true),
             )
             // Map legacy env vars to new config structure
             .set_override_option("database_url", env::var("DATABASE_URL").ok())?
