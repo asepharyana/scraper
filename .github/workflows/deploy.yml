@@ -33,6 +33,8 @@ jobs:
           extra-conf: |
             sandbox = false
             accept-flake-config = true
+            extra-substituters = https://attic.asepharyana.my.id/asepharyana https://attic.asepharyana.my.id/gmw
+            extra-trusted-public-keys = asepharyana:zBpY6vNI1nDJ4mU6W4q880BB0JB1qb3gRKkO/tGSMiQ= gmw:Fq2Anzuhkb+T/hftWnPcveHSi21/RzIgIOeG8pCJa88=
 
       - name: Cache Nix
         uses: DeterminateSystems/magic-nix-cache-action@v14
@@ -45,10 +47,55 @@ jobs:
           nix build .#scraper --impure --option sandbox false --print-build-logs
           STORE_PATH=$(readlink result)
           echo "store-path=$STORE_PATH" >> "$GITHUB_OUTPUT"
-          echo "✅ scraper: $STORE_PATH"
+          echo "Build OK scraper: $STORE_PATH"
+
+      - name: Push to Attic cache
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "$ATTIC_TOKEN" ]; then
+            echo "ATTIC_TOKEN not set; skipping attic push"
+            exit 0
+          fi
+          STORE_PATH="${{ steps.build.outputs.store-path }}"
+          ATTIC_DIR="/nix/store/fygyy3yk4rqdknxkiwkqambpnhyax0k4-attic-0.1.0"
+
+          ATTIC_BIN=""
+          if command -v attic >/dev/null 2>&1; then
+            ATTIC_BIN="$(command -v attic)"
+          elif nix-store --realise "$ATTIC_DIR" 2>/tmp/attic-bootstrap.err; then
+            echo "✅ Pulled attic client from attic cache (HTTPS substituter)"
+            ATTIC_BIN="$ATTIC_DIR/bin/attic"
+          else
+            echo "attic client unavailable on runner; skipping attic push"
+            tail -5 /tmp/attic-bootstrap.err 2>/dev/null || true
+            exit 0
+          fi
+
+          mkdir -p "$HOME/.config/attic"
+          cat > "$HOME/.config/attic/config.toml" <<EOF
+          default-server = "pub"
+
+          [servers.pub]
+          endpoint = "https://attic.asepharyana.my.id"
+          token = "$ATTIC_TOKEN"
+          EOF
+
+          push_ok=""
+          for attempt in 1 2 3; do
+            if "$ATTIC_BIN" push pub:asepharyana "$STORE_PATH" --jobs 4 --ignore-upstream-cache-filter; then
+              echo "✅ Pushed $STORE_PATH to attic directly from runner"
+              push_ok=1
+              break
+            fi
+            echo "⚠️ Direct attic push attempt $attempt/3 failed; retrying in 10s..."
+            sleep 10
+          done
+          if [ -z "$push_ok" ]; then
+            echo "Direct attic push failed after 3 attempts; deploy will fall back to ssh copy"
+          fi
 
       - name: Setup SSH key
-        if: github.ref == 'refs/heads/main'
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
@@ -60,16 +107,20 @@ jobs:
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy scraper to VPS
-        if: github.ref == 'refs/heads/main'
         run: |
           STORE_PATH="${{ steps.build.outputs.store-path }}"
-          echo "=== Copying scraper: $STORE_PATH ==="
-          nix copy --to "ssh://${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "$STORE_PATH"
+          echo "=== Realising scraper: $STORE_PATH (substitute from attic, fallback ssh copy) ==="
+          if ssh "$VPS_USER@$VPS_HOST" "sudo /nix/var/nix/profiles/default/bin/nix-store --realise '$STORE_PATH'" 2>/dev/null; then
+            echo "Substituted scraper from Attic cache"
+          else
+            echo "Attic substitute failed; falling back to ssh copy"
+            nix copy --to "ssh://${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "$STORE_PATH"
+          fi
 
           echo "=== Updating profile ==="
           ssh "$VPS_USER@$VPS_HOST" "sudo /nix/var/nix/profiles/default/bin/nix-env --profile /nix/var/nix/profiles/scraper --set '$STORE_PATH'"
 
           echo "=== Restarting service ==="
-          ssh "$VPS_USER@$VPS_HOST" "sudo systemctl restart scraper" || echo "  ⚠️ restart failed (may not be enabled yet)"
+          ssh "$VPS_USER@$VPS_HOST" "sudo systemctl restart scraper && for i in \$(seq 1 15); do state=\$(systemctl is-active scraper 2>/dev/null || echo inactive); [ \"\$state\" = \"active\" ] && break; sleep 2; done; echo \"final-state=\$state\"; [ \"\$state\" = \"active\" ]"
 
           echo "✅ scraper deployed"
