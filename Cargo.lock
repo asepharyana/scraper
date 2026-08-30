@@ -1929,7 +1929,9 @@ dependencies = [
 
 [[package]]
 name = "mytheclipse-queue"
-version = "1.21.1"
+version = "1.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69336d185604c63995d1abacfa57b2efea22088384091f0297888c4d8e0e6582"
 dependencies = [
  "async-trait",
  "serde",
@@ -1941,7 +1943,9 @@ dependencies = [
 
 [[package]]
 name = "mytheclipse-tracing"
-version = "1.21.1"
+version = "1.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29b88590e83cd7ab9cddc42d04dfa8836f1cd758b83c84cabcc4f17d0470cf7a"
 dependencies = [
  "tracing",
  "tracing-subscriber",
