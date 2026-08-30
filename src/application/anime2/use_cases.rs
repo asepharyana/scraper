@@ -296,19 +296,18 @@ impl Anime2UseCases {
                         .map(|ep| ep.url.clone())
                         .collect();
 
-                    let results: Vec<_> = futures::future::join_all(latest.iter().map(|url| {
-                        self.repository.fetch_html(url)
-                    }))
+                    let results: Vec<_> = futures::future::join_all(
+                        latest.iter().map(|url| self.repository.fetch_html(url)),
+                    )
                     .await;
 
                     for (i, result) in results.into_iter().enumerate() {
                         if let Ok(html) = result {
-                            if let Ok(Some(dl_url)) =
-                                tokio::task::spawn_blocking(move || {
-                                    parser::parse_episode_download(&html)
-                                })
-                                .await
-                                .unwrap_or(Ok(None))
+                            if let Ok(Some(dl_url)) = tokio::task::spawn_blocking(move || {
+                                parser::parse_episode_download(&html)
+                            })
+                            .await
+                            .unwrap_or(Ok(None))
                             {
                                 if let Some(ep) = episodes.get_mut(i) {
                                     ep.download_url = Some(dl_url);

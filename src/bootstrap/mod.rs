@@ -26,7 +26,13 @@ impl Application {
             Err(_) => EnvFilter::new("warn,html5ever=error"),
         };
 
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        // Use mytheclipse-tracing's formatted layer, composed with the
+        // scraper's own env filter (default: warn + html5ever=error).
+        use tracing_subscriber::layer::{Layer, SubscriberExt};
+        use tracing_subscriber::util::SubscriberInitExt;
+        let _ = tracing_subscriber::registry()
+            .with(mytheclipse_tracing::TracingLayer::layer().with_filter(env_filter))
+            .try_init();
 
         // Initialize OpenTelemetry metrics
         crate::observability::metrics::init_otel_metrics();
@@ -34,17 +40,27 @@ impl Application {
         tracing::info!("🚀 Scraper starting up...");
         tracing::info!("   Environment: {}", CONFIG.environment);
 
-        // Log thread configuration
-        let worker_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        // Thread configuration from mytheclipse runtime_auto
+        let runtime_cfg = mytheclipse::runtime_auto::RuntimeConfig::auto();
         tracing::info!(
-            "   Tokio Worker Threads: (Defaulting to CPU cores: {})",
-            worker_threads
+            "   Tokio Worker Threads: {} (auto from CPU cores)",
+            runtime_cfg.worker_threads
+        );
+        tracing::info!(
+            "   Max Blocking Threads: {} | Compute Threads: {} | IO Threads: {}",
+            runtime_cfg.max_blocking_threads,
+            runtime_cfg.compute_threads,
+            runtime_cfg.io_threads
         );
 
         // Redis
         let _ = get_redis_conn().await;
+
+        // Job queue + daily scheduler (mytheclipse-queue + mytheclipse::cron)
+        crate::infrastructure::queue::init_global_job_queue();
+        if let Err(e) = crate::infrastructure::scheduler::start_scheduler() {
+            tracing::error!("[scheduler] failed to start daily cleanup: {e}");
+        }
 
         // Database
         let mut opt = sea_orm::ConnectOptions::new(CONFIG.database_url.clone());

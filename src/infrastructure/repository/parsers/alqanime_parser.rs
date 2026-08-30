@@ -80,8 +80,7 @@ static SLUG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/([^/]+)/?$")
 static GENRE_SLUG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"genre-(.+)$").unwrap());
 static EPISODE_LIST_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".eplister ul li").unwrap());
-static EP_NUM_SELECTOR: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(".epl-num").unwrap());
+static EP_NUM_SELECTOR: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".epl-num").unwrap());
 static EP_TITLE_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".epl-title").unwrap());
 static EP_DATE_SELECTOR: LazyLock<Selector> =

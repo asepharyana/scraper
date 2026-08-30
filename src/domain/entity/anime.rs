@@ -289,5 +289,3 @@ pub struct FilterAnimeItem {
     pub r#type: String,
     pub anime_url: String,
 }
-
-

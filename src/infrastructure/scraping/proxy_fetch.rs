@@ -111,7 +111,11 @@ pub async fn fetch_with_proxy(slug: &str) -> Result<FetchResult, AppError> {
             let slug_clone = slug.to_string();
             let tx_clone = tx.clone();
 
-            tokio::spawn(async move {
+            // Leader task: bounded by mytheclipse spawn_io (tracing-instrumented)
+            // and the global fetch concurrency limiter (tokio Semaphore bridge).
+            // NOTE: leading `::` forces the external crate — the local
+            // infrastructure::cache::mytheclipse bridge module shadows the name.
+            ::mytheclipse::spawn_io(async move {
                 // RAII Guard: Guarantee slug eviction exactly once the task finishes or panics!
                 struct DropGuard(String);
                 impl Drop for DropGuard {
@@ -121,6 +125,9 @@ pub async fn fetch_with_proxy(slug: &str) -> Result<FetchResult, AppError> {
                 }
                 let _guard = DropGuard(slug_clone.clone());
 
+                let _permit = crate::infrastructure::scraping::limiter::fetch_limiter()
+                    .acquire()
+                    .await;
                 let result = perform_fetch(&slug_clone).await;
 
                 // Map AppError to String for broadcast (since AppError might not be Clone)
@@ -194,8 +201,11 @@ async fn perform_fetch(slug: &str) -> Result<FetchResult, AppError> {
 
                 // Check if response is Gzip compressed (magic header 1f 8b)
                 let text_data = if bytes.len() > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
-                    // Gzip compressed, offload decompression to blocking thread
-                    let decompressed = tokio::task::spawn_blocking(move || {
+                    // Gzip compressed, offload decompression to mytheclipse compute
+                    // (sized rayon pool, panic-isolated) instead of the blocking pool.
+                    // NOTE: leading `::` forces the external crate (shadowed by the
+                    // local infrastructure::cache::mytheclipse bridge module).
+                    let decompressed = ::mytheclipse::compute(move || {
                         use flate2::read::GzDecoder;
                         use std::io::Read;
                         let decoder = GzDecoder::new(&bytes[..]);
@@ -212,7 +222,9 @@ async fn perform_fetch(slug: &str) -> Result<FetchResult, AppError> {
                                 ))
                             })
                     })
-                    .await??;
+                    .map_err(|e| {
+                        AppError::Internal(format!("Compute decompression failed: {e}"))
+                    })??;
 
                     match std::str::from_utf8(&decompressed) {
                         Ok(s) => s.to_string(),
