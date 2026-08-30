@@ -2,12 +2,11 @@
 // Updated for sync Redis API, reqwest API changes, and concurrency optimization.
 
 use dashmap::DashMap;
-use redis::AsyncCommands;
 use std::sync::LazyLock;
 use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 
-use crate::infrastructure::cache::redis_pool::get_redis_conn;
+use crate::infrastructure::cache::mytheclipse;
 use crate::infrastructure::utils::cache_ttl::CACHE_TTL_VERY_SHORT;
 use crate::infrastructure::utils::http::common_headers;
 use crate::infrastructure::utils::http::is_internet_baik_block_page;
@@ -52,13 +51,13 @@ fn get_fetch_cache_key(slug: &str) -> String {
 }
 
 async fn get_cached_fetch(slug: &str) -> Result<Option<FetchResult>, AppError> {
-    let mut conn = get_redis_conn().await?;
     let key = get_fetch_cache_key(slug);
+    let bytes = mytheclipse::get(&key)
+        .await
+        .map_err(|e| AppError::Internal(format!("Cache get failed for {}: {}", slug, e)))?;
 
-    let cached: Option<String> = conn.get(&key).await?;
-
-    if let Some(cached_str) = cached {
-        match serde_json::from_str::<FetchResult>(&cached_str) {
+    if let Some(bytes) = bytes {
+        match serde_json::from_slice::<FetchResult>(&bytes) {
             Ok(parsed) => {
                 debug!("[fetchWithProxy] Returning cached response for {}", slug);
                 Ok(Some(parsed))
@@ -71,14 +70,17 @@ async fn get_cached_fetch(slug: &str) -> Result<Option<FetchResult>, AppError> {
 }
 
 async fn set_cached_fetch(slug: &str, value: &FetchResult) -> Result<(), AppError> {
-    let mut conn = get_redis_conn().await?;
     let key = get_fetch_cache_key(slug);
-    let json_string = serde_json::to_string(value)?;
+    let json = serde_json::to_vec(value)?;
 
     // Use standardized TTL
-    conn.set_ex::<_, _, ()>(&key, &json_string, CACHE_TTL_VERY_SHORT)
-        .await?;
-    Ok(())
+    mytheclipse::set(
+        &key,
+        json,
+        Some(std::time::Duration::from_secs(CACHE_TTL_VERY_SHORT)),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Cache set failed for {}: {}", slug, e)))
 }
 // --- REDIS CACHE WRAPPER END ---
 

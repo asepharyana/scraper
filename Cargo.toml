@@ -13,6 +13,11 @@ default-run = "scraper"
 
 # Dependensi yang dibutuhkan saat aplikasi berjalan
 [dependencies]
+mytheclipse = { version = "1.20", features = ["resiliency", "traffic"] }
+mytheclipse-cache = { path = "/home/code/mytheclipse/crates/mytheclipse-cache", features = ["l2-redis", "cache-aside"] }
+mytheclipse-config = { version = "1.20" }
+mytheclipse-event = { version = "1.20" }
+
 axum = { version = "0.8.8", features = ["ws", "multipart", "macros"] }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -36,7 +41,6 @@ urlencoding = "2.1"
 url = "2.5.8"
 
 tower-http = { version = "0.6.8", features = ["fs", "cors", "compression-gzip", "compression-br", "compression-zstd"] }
-backoff = { version = "0.4", features = ["futures", "tokio"] }
 dashmap = "6.1"
 deadpool-redis = { version = "0.22.1", features = ["serde"] }
 rayon = "1.11"
@@ -44,7 +48,6 @@ scraper = "0.25.0"
 flate2 = "1.1"
 redis = { version = "0.32.7", features = ["tokio-rustls-comp", "safe_iterators"] }
 thiserror = "2.0.18"
-config = { version = "0.15.19", features = ["toml"] }
 
 utoipa = { version = "5.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }

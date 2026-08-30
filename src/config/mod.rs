@@ -5,7 +5,7 @@
 //! - Fails fast at startup if required variables are missing
 //! - Supports hierarchical configuration (default -> environment-specific)
 
-use config::{Config, ConfigError, Environment, File};
+use mytheclipse_config::ConfigError;
 use serde::Deserialize;
 use std::env;
 use std::sync::LazyLock;
@@ -220,6 +220,8 @@ impl AppConfig {
     /// 2. `config/{environment}.toml`
     /// 3. `config/default.toml`
     pub fn load() -> Result<Self, ConfigError> {
+        use mytheclipse_config::ConfigLoader;
+
         // Load .env file first
         if let Err(e) = dotenvy::dotenv() {
             tracing::debug!("Could not load .env file: {}", e);
@@ -227,24 +229,40 @@ impl AppConfig {
 
         let run_mode = env::var("RUN_MODE").unwrap_or_else(|_| "development".into());
 
-        let config = Config::builder()
-            // Start with default config file
-            .add_source(File::with_name("config/default").required(false))
-            // Layer on environment-specific values
-            .add_source(File::with_name(&format!("config/{}", run_mode)).required(false))
-            // Add environment variables (with APP_ prefix)
-            .add_source(
-                Environment::with_prefix("APP")
-                    .separator("__")
-                    .try_parsing(true),
-            )
-            // Map legacy env vars to new config structure
-            .set_override_option("database_url", env::var("DATABASE_URL").ok())?
-            .set_override_option("jwt_secret", env::var("JWT_SECRET").ok())?
-            .set_override_option("redis_url", env::var("REDIS_URL").ok())?
-            .build()?;
+        // Start with default config file (optional — many deploys are env-only)
+        let mut loader = ConfigLoader::<AppConfig>::new()
+            .load_dotenv(std::path::Path::new(".env"))
+            .unwrap_or_else(|_| ConfigLoader::<AppConfig>::new());
 
-        config.try_deserialize()
+        let default_path = std::path::Path::new("config/default.toml");
+        if default_path.exists() {
+            loader = loader.merge_file(default_path)?;
+        }
+        // Layer on environment-specific values (optional)
+        let env_path_str = format!("config/{}.toml", run_mode);
+        let env_path = std::path::Path::new(&env_path_str);
+        if env_path.exists() {
+            loader = loader.merge_file(env_path)?;
+        }
+
+        // Add environment variables (with APP_ prefix)
+        loader = loader.merge_env("APP");
+
+        // Map legacy env vars to new config structure.
+        // ConfigLoader merges at leaf level; legacy vars override the merged
+        // value directly (highest priority after APP_*).
+        let mut value = loader.peek().clone();
+        if let Ok(v) = env::var("DATABASE_URL") {
+            value["database_url"] = serde_json::Value::String(v);
+        }
+        if let Ok(v) = env::var("JWT_SECRET") {
+            value["jwt_secret"] = serde_json::Value::String(v);
+        }
+        if let Ok(v) = env::var("REDIS_URL") {
+            value["redis_url"] = serde_json::Value::String(v);
+        }
+
+        ConfigLoader::<AppConfig>::new().merge_value(value).build()
     }
 
     /// Check if running in production mode

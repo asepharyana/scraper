@@ -77,7 +77,7 @@ impl Application {
 
         // App State components
         let db_arc = Arc::new(db);
-        let event_bus = Arc::new(crate::events::bus::EventBus::new());
+        let event_bus = Arc::new(crate::events::bus::new_event_bus());
 
         let redis_pool = crate::infrastructure::cache::redis_pool::redis_pool()
             .map_err(|e| anyhow::anyhow!("Failed to init Redis pool: {}", e))?;

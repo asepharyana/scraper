@@ -1,7 +1,6 @@
 //! Otakudesu anime scraping repository.
 
 use async_trait::async_trait;
-use backoff::future::retry;
 use tracing::{info, warn};
 
 use crate::domain::entity::anime::{
@@ -13,7 +12,7 @@ use crate::domain::repository::ScrapingRepository;
 use crate::infrastructure::repository::parsers::otakudesu_parser;
 use crate::infrastructure::scraping::html_fetcher::fetch_html_with_retry;
 use crate::infrastructure::scraping::proxy_fetch::fetch_with_proxy;
-use crate::infrastructure::scraping::retry::{default_backoff, transient};
+use crate::infrastructure::scraping::retry::{default_backoff, retry, retry_all};
 
 const OTAKUDESU_BASE_URL: &str = "https://otakudesu.cloud";
 
@@ -208,14 +207,11 @@ impl OtakudesuRepository {
                 }
                 Err(e) => {
                     warn!("Failed to fetch URL: {}, error: {:?}", url_owned, e);
-                    Err(transient(ScrapingError::Http(format!(
-                        "Proxy fetch failed: {}",
-                        e
-                    ))))
+                    Err(ScrapingError::Http(format!("Proxy fetch failed: {}", e)))
                 }
             }
         };
-        retry(backoff, fetch_op)
+        retry(backoff, retry_all, fetch_op)
             .await
             .map_err(|e| ScrapingError::Http(e.to_string()))
     }

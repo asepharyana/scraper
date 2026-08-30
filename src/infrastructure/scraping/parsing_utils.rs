@@ -4,8 +4,7 @@
 
 use crate::domain::error::ScrapingError;
 use crate::infrastructure::scraping::proxy_fetch::fetch_with_proxy;
-use crate::infrastructure::scraping::retry::{default_backoff, transient};
-use backoff::future::retry;
+use crate::infrastructure::scraping::retry::{default_backoff, retry, retry_all};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use std::sync::LazyLock;
@@ -23,12 +22,12 @@ pub async fn fetch_html_with_retry(url: &str) -> Result<String, ScrapingError> {
             }
             Err(e) => {
                 warn!("Failed to fetch: {}, error: {:?}", url, e);
-                Err(transient(e))
+                Err(e)
             }
         }
     };
 
-    retry(backoff, fetch_operation)
+    retry(backoff, retry_all, fetch_operation)
         .await
         .map_err(|e| ScrapingError::Http(e.to_string()))
 }
