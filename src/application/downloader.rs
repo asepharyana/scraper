@@ -1,0 +1,155 @@
+//! Application-layer use cases for media downloading.
+//!
+//! Thin coordinators that delegate to `DownloaderRepository` and return
+//! `DownloadResult` domain entities. Each use case corresponds to one
+//! downloader endpoint defined in the spec (Shirokami-API reference).
+
+use crate::domain::entity::downloader::DownloadResult;
+use crate::domain::error::ScrapingError;
+use crate::infrastructure::repository::DownloaderRepository;
+
+/// Use case: unified dispatcher — auto-detects platform from URL pattern
+/// and delegates to the appropriate downloader.
+pub async fn download_all_in_one(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_all_in_one(url, cookies).await
+}
+
+pub async fn download_instagram(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_instagram(url, cookies).await
+}
+
+pub async fn download_facebook(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_facebook(url, cookies).await
+}
+
+pub async fn download_tiktok(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_tiktok(url, cookies).await
+}
+
+pub async fn download_youtube(url: &str, quality: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_youtube(url, quality).await
+}
+
+pub async fn download_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_youtube_mp3(url).await
+}
+
+pub async fn download_spotify(
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_spotify(url, api_key).await
+}
+
+pub async fn download_twitter(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_twitter(url, cookies).await
+}
+
+pub async fn download_pinterest(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_pinterest(url).await
+}
+
+pub async fn download_mega(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_mega(url).await
+}
+
+pub async fn download_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_terabox(url).await
+}
+
+pub async fn download_gdrive(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_gdrive(url).await
+}
+
+pub async fn download_mediafire(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_mediafire(url).await
+}
+
+pub async fn download_pixeldrain(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_pixeldrain(url).await
+}
+
+pub async fn download_threads(
+    url: &str,
+    cookies: Option<&str>,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_threads(url, cookies).await
+}
+
+pub async fn download_doodstream(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_doodstream(url).await
+}
+
+pub async fn download_krakenfiles(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_krakenfiles(url).await
+}
+
+pub async fn download_danbooru(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_danbooru(url).await
+}
+
+pub async fn download_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_soundcloud(url).await
+}
+
+pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_bilibili(url).await
+}
+
+/// Use case: detect platform from URL pattern.
+pub fn detect_platform(url: &str) -> String {
+    if url.contains("instagram.com") || url.contains("instagr.am") {
+        "instagram".to_string()
+    } else if url.contains("facebook.com") || url.contains("fb.watch") {
+        "facebook".to_string()
+    } else if url.contains("tiktok.com") || url.contains("vm.tiktok.com") {
+        "tiktok".to_string()
+    } else if url.contains("youtube.com") || url.contains("youtu.be") {
+        "youtube".to_string()
+    } else if url.contains("open.spotify.com") || url.contains("spotify.link") {
+        "spotify".to_string()
+    } else if url.contains("twitter.com") || url.contains("x.com") || url.contains("t.co") {
+        "twitter".to_string()
+    } else if url.contains("pinterest") {
+        "pinterest".to_string()
+    } else if url.contains("mega.nz") || url.contains("mega.io") {
+        "mega".to_string()
+    } else if url.contains("terabox") || url.contains("nfile") {
+        "terabox".to_string()
+    } else if url.contains("drive.google.com") || url.contains("docs.google.com") {
+        "gdrive".to_string()
+    } else if url.contains("mediafire.com") {
+        "mediafire".to_string()
+    } else if url.contains("pixeldrain.com") {
+        "pixeldrain".to_string()
+    } else if url.contains("threads.net") || url.contains("threads.com") {
+        "threads".to_string()
+    } else if url.contains("dood.") || url.contains("doodstream") || url.contains("dood.so") {
+        "doodstream".to_string()
+    } else if url.contains("krakenfiles.com") {
+        "krakenfiles".to_string()
+    } else if url.contains("danbooru") || url.contains("safebooru") || url.contains("rule34") {
+        "danbooru".to_string()
+    } else if url.contains("soundcloud.com") {
+        "soundcloud".to_string()
+    } else if url.contains("bilibili.com") || url.contains("b23.tv") {
+        "bilibili".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}

@@ -132,3 +132,9 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
+
+impl From<ScrapingError> for AppError {
+    fn from(e: ScrapingError) -> Self {
+        AppError::Internal(format!("{}", e))
+    }
+}

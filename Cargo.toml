@@ -1,4 +1,3 @@
-
 [package]
 name = "scraper-service"
 version = "0.1.0"
@@ -45,6 +44,13 @@ regex = "1.12.2"
 
 urlencoding = "2.1"
 url = "2.5.8"
+base64 = "0.22"
+cipher = "0.4"
+aes = "0.8"
+cbc = "0.1"
+block-padding = "0.3"
+hex = "0.4"
+fastrand = "2.0"
 
 tower-http = { version = "0.6.8", features = ["fs", "cors", "compression-gzip", "compression-br", "compression-zstd"] }
 dashmap = "6.1"
@@ -59,9 +65,10 @@ utoipa = { version = "5.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # OpenTelemetry metrics
-opentelemetry = { version = "0.27", features = ["metrics"] }
-opentelemetry_sdk = { version = "0.27", features = ["metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["metrics"] }
+opentelemetry = { version = "0.28", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.28", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", features = ["metrics"] }
+
 
 # Dependensi yang hanya dibutuhkan untuk build script (build.rs)
 

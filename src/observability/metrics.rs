@@ -4,6 +4,8 @@
 //! - Global `MeterProvider` connected via OTLP gRPC to the metrics backend
 //! - Standard HTTP server metrics middleware
 //!
+//! #![allow(clippy::all)]
+//!
 //! Environment:
 //!   OTEL_EXPORTER_OTLP_ENDPOINT  — default: http://localhost:4317
 //!   OTEL_SERVICE_NAME             — default: scraper-api
@@ -47,16 +49,18 @@ pub fn init_otel_metrics() {
 
         // Build the gRPC OTLP exporter
         let exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
+            .with_http()
             .with_endpoint(endpoint.clone())
             .build()
             .expect("Failed to create OTLP metric exporter");
 
-        let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio)
+        let reader = PeriodicReader::builder(exporter)
             .with_interval(std::time::Duration::from_millis(export_interval_ms))
             .build();
 
-        let resource = Resource::new(vec![KeyValue::new("service.name", service_name.clone())]);
+        let resource = Resource::builder()
+            .with_service_name(service_name.clone())
+            .build();
 
         let provider = MeterProviderBuilder::default()
             .with_resource(resource)
