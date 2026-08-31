@@ -520,23 +520,29 @@ pub fn parse_genre_anime_document(
     let document = parse_html(html);
     let mut items = Vec::new();
 
-    let venz_sel = selector(".venz ul li")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse .venz ul li selector".into()))?;
-    let title_sel = selector(".thumbz h2.jdlflm")
+    // Current otakudesu genre archive pages use the `.col-anime` card layout
+    // (`.col-md-4 .col-anime`), each with `.col-anime-title a`, `.col-anime-eps`,
+    // `.col-anime-rating`, `.col-anime-cover img` and a synopsis. The old
+    // `.venz ul li` / `.thumbz h2.jdlflm` / `.epz` layout no longer appears on
+    // these pages, which made genre filtering silently return 0 items.
+    let card_sel = selector(".col-anime")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse .col-anime selector".into()))?;
+    let title_sel = selector(".col-anime-title a")
         .ok_or_else(|| ScrapingError::Parse("Failed to parse title selector".into()))?;
-    let link_sel = selector("a")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse link selector".into()))?;
-    let img_sel = selector("img")
+    let eps_sel = selector(".col-anime-eps")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse eps selector".into()))?;
+    let rating_sel = selector(".col-anime-rating")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse rating selector".into()))?;
+    let img_sel = selector(".col-anime-cover img")
         .ok_or_else(|| ScrapingError::Parse("Failed to parse img selector".into()))?;
-    let ep_sel = selector(".epz")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse epz selector".into()))?;
 
-    for element in document.select(&venz_sel) {
+    for element in document.select(&card_sel) {
         let title = text_from_or(&element, &title_sel, "");
-        let anime_url = attr_from_or(&element, &link_sel, "href", "");
+        let anime_url = attr_from_or(&element, &title_sel, "href", "");
         let slug = extract_slug(&anime_url);
         let poster = attr_from_or(&element, &img_sel, "src", "");
-        let episode = text_from_or(&element, &ep_sel, "N/A");
+        let episode = text_from_or(&element, &eps_sel, "N/A");
+        let score = text_from_or(&element, &rating_sel, "");
 
         if !title.is_empty() {
             items.push(GenreAnimeItem {
@@ -544,7 +550,7 @@ pub fn parse_genre_anime_document(
                 slug,
                 poster,
                 episode,
-                score: String::new(),
+                score,
                 status: String::new(),
                 anime_url,
             });

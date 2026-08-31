@@ -56,7 +56,10 @@ impl OtakudesuRepository {
     }
 
     pub fn genre_page_url(&self, genre_slug: &str, page: &str) -> String {
-        format!("{}/genre/{}/page/{}/", self.base_url(), genre_slug, page)
+        // Current otakudesu uses the plural `/genres/{slug}/` path (archive
+        // layout). The singular `/genre/{slug}/page/{page}/` path 301-redirects
+        // to otakudesu.io (a 404 placeholder), which made genre pages return 0.
+        format!("{}/genres/{}/page/{}/", self.base_url(), genre_slug, page)
     }
 
     pub fn full_episode_url(&self, slug: &str) -> String {
@@ -144,7 +147,14 @@ impl OtakudesuRepository {
         &self,
         slug: &str,
     ) -> Result<(Vec<LatestAnimeItem>, Pagination), ScrapingError> {
-        let url = self.page_url("latest-anime", slug);
+        // The site's `/latest-anime/` path was removed (301 → otakudesu.io
+        // placeholder). The homepage IS the latest-episodes page (`.venz ul li`
+        // with `.thumbz h2.jdlflm`, `.epz`), paginated via WordPress `/page/N/`.
+        let url = if slug == "1" {
+            format!("{}/", self.base_url())
+        } else {
+            format!("{}/page/{}/", self.base_url(), slug)
+        };
         let html = self.fetch_html(&url).await?;
         let slug_owned = slug.to_string();
         tokio::task::spawn_blocking(move || {
