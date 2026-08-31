@@ -24,13 +24,13 @@ impl<'a> Cache<'a> {
         }
     }
 
-    async fn cache(&self) -> Result<&'static mytheclipse_cache::RedisCache, CacheError> {
-        super::mytheclipse::redis_cache().await
+    async fn cache(&self) -> Result<mytheclipse_cache::RedisCache, CacheError> {
+        super::mytheclipse::fresh_redis_cache().await
     }
 
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         match self.cache().await {
-            Ok(cache) => match CacheTrait::get(cache, key).await {
+            Ok(cache) => match CacheTrait::get(&cache, key).await {
                 Ok(Some(bytes)) => serde_json::from_slice(&bytes).ok(),
                 Ok(None) => None,
                 Err(e) => {
@@ -69,7 +69,7 @@ impl<'a> Cache<'a> {
         let json = serde_json::to_vec(value).map_err(|e| e.to_string())?;
         let ttl = std::time::Duration::from_secs(ttl_secs);
         let cache = self.cache().await.map_err(|e| e.to_string())?;
-        CacheTrait::set(cache, key, json, Some(ttl))
+        CacheTrait::set(&cache, key, json, Some(ttl))
             .await
             .map_err(|e| e.to_string())?;
         debug!("Cache: set key {} with TTL {}s", key, ttl_secs);
@@ -78,7 +78,7 @@ impl<'a> Cache<'a> {
 
     pub async fn delete(&self, key: &str) -> Result<(), String> {
         let cache = self.cache().await.map_err(|e| e.to_string())?;
-        CacheTrait::invalidate(cache, key)
+        CacheTrait::invalidate(&cache, key)
             .await
             .map_err(|e| e.to_string())
     }
@@ -88,6 +88,12 @@ impl<'a> Cache<'a> {
     }
 
     /// Get or set: returns cached value or computes and caches new value.
+    ///
+    /// The cache is best-effort: if the post-compute write fails (e.g. a
+    /// transient Redis outage or a broken pooled connection), the freshly
+    /// computed value is still returned rather than propagating a 500. Only a
+    /// cache *read* failure is silently tolerated; a compute failure still
+    /// propagates.
     pub async fn get_or_set<T, F, Fut>(
         &self,
         key: &str,
@@ -106,7 +112,12 @@ impl<'a> Cache<'a> {
 
         debug!("Cache miss: {}", key);
         let value = compute().await?;
-        self.set_with_ttl(key, &value, ttl_secs).await?;
+        // Best-effort write: a failure here must not fail the request — the
+        // value is already valid. Log and continue (read path swallows errors
+        // too, so a broken cache degrades to cache-less, never to 500).
+        if let Err(e) = self.set_with_ttl(key, &value, ttl_secs).await {
+            debug!("Cache: failed to write {} (non-fatal): {}", key, e);
+        }
         Ok(value)
     }
 }

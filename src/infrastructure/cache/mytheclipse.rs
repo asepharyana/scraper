@@ -6,39 +6,38 @@
 //! same `redis` crate version, a `deadpool_redis::Connection` can be converted
 //! directly into a `redis::aio::MultiplexedConnection` via `take()`.
 
-use std::sync::LazyLock;
-
 use mytheclipse_cache::{Cache, CacheError, RedisCache};
-use tokio::sync::OnceCell;
 
 use crate::infrastructure::cache::redis_pool::redis_pool;
 
-/// Lazily-initialised shared `RedisCache` built from the deadpool pool.
+/// Build a fresh `RedisCache` from a freshly checked-out deadpool connection
+/// on each call.
 ///
-/// The multiplexed connection is cheaply cloneable (Arc-backed), so the whole
-/// process shares one logical connection while deadpool manages recycling.
-static REDIS_CACHE: LazyLock<OnceCell<RedisCache>> = LazyLock::new(OnceCell::new);
-
-/// Return a handle to the shared mytheclipse `RedisCache`, initialising it on
-/// first use from the deadpool pool.
-pub async fn redis_cache() -> Result<&'static RedisCache, CacheError> {
-    let cell = &*REDIS_CACHE;
-    cell.get_or_try_init(|| async {
-        let pool = redis_pool().map_err(CacheError::Io)?;
-        let conn = pool
-            .get()
-            .await
-            .map_err(|e| CacheError::Io(e.to_string()))?;
-        let mux = deadpool_redis::Connection::take(conn);
-        Ok(RedisCache::new(mux))
-    })
-    .await
+/// Why fresh on every call (not a cached singleton): the previous design
+/// initialised *one* `RedisCache` (one multiplexed connection) on first use and
+/// kept it forever. If that single connection broke (Redis restart, idle
+/// timeout, network blip), every cache operation failed with `broken pipe`
+/// until the whole process restarted — and because `Cache::get_or_set`
+/// propagated write errors, **every API returned 500**.
+///
+/// Building fresh lets deadpool recycle and re-establish broken connections on
+/// checkout, so caching self-heals without a process restart. The multiplexed
+/// connection is cheaply cloneable (`Arc`-backed), so a per-call pool checkout
+/// is negligible overhead next to the network I/O.
+pub(crate) async fn fresh_redis_cache() -> Result<RedisCache, CacheError> {
+    let pool = redis_pool().map_err(CacheError::Io)?;
+    let conn = pool
+        .get()
+        .await
+        .map_err(|e| CacheError::Io(e.to_string()))?;
+    let mux = deadpool_redis::Connection::take(conn);
+    Ok(RedisCache::new(mux))
 }
 
 /// Convenience wrappers so callers can use the mytheclipse `Cache` methods
 /// directly without importing the trait twice.
 pub async fn get(key: &str) -> Result<Option<Vec<u8>>, CacheError> {
-    redis_cache().await?.get(key).await
+    fresh_redis_cache().await?.get(key).await
 }
 
 pub async fn set(
@@ -46,9 +45,9 @@ pub async fn set(
     value: Vec<u8>,
     ttl: Option<std::time::Duration>,
 ) -> Result<(), CacheError> {
-    redis_cache().await?.set(key, value, ttl).await
+    fresh_redis_cache().await?.set(key, value, ttl).await
 }
 
 pub async fn invalidate(key: &str) -> Result<(), CacheError> {
-    redis_cache().await?.invalidate(key).await
+    fresh_redis_cache().await?.invalidate(key).await
 }
