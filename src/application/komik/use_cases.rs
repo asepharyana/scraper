@@ -49,7 +49,7 @@ impl KomikUseCases {
             .get_or_set("komik:genres:list:v3", GENRE_LIST_CACHE_TTL, || async {
                 let html = self
                     .repository
-                    .fetch_html(&self.repository.api_url())
+                    .fetch_html(&self.repository.base_url())
                     .await
                     .map_err(|e| e.to_string())?;
                 let genres = tokio::task::spawn_blocking(move || parser::parse_genres(&html))

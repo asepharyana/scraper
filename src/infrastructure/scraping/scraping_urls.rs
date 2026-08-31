@@ -21,13 +21,14 @@ pub fn get_production_url() -> String {
 
 /// Get Komik API URL from environment config.
 ///
-/// Defaults to `https://komiku.org` (NOT the legacy `api.komiku.org`): the
-/// `api.komiku.org` root returns an empty body (site-side), which broke the
-/// komik genre-list endpoint. `komiku.org` serves identical sub-path content
-/// (manga lists, genre, search) plus a populated root, so the module is
-/// consolidated onto the canonical, working domain.
+/// Defaults to `https://api.komiku.org`. This is the API mirror whose
+/// sub-paths (`/manga/?tipe=manga`, `/genre/<slug>/`, `/search/<q>/`) serve
+/// the `.bge` grid layout the parsers expect. NOTE: `api.komiku.org`'s ROOT
+/// path returns an empty body — the komik genre-list endpoint must therefore
+/// fetch from `komiku.org` (base URL) instead of this root (see
+/// `KomikUseCase::genre_list`, which uses `base_url()`).
 pub fn get_komik_api_url() -> String {
-    env::var("KOMIK2_API_URL").unwrap_or_else(|_| "https://komiku.org".to_string())
+    env::var("KOMIK2_API_URL").unwrap_or_else(|_| "https://api.komiku.org".to_string())
 }
 
 /// Get Otakudesu URL from environment config.
