@@ -410,6 +410,16 @@ pub fn parse_latest_anime_document(
 // SEARCH ANIME PAGE
 // ============================================================================
 
+/// Normalise scraped text: collapse newlines/tabs into single spaces and trim.
+fn clean_text(text: String) -> String {
+    text.replace(['\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
 pub fn parse_search_anime_document(
     html: &str,
     page: &str,
@@ -417,53 +427,82 @@ pub fn parse_search_anime_document(
     let document = parse_html(html);
     let mut items = Vec::new();
 
-    let venz_sel = selector(".venz ul li")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse .venz ul li selector".into()))?;
-    let title_sel = selector(".thumbz h2.jdlflm")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse title selector".into()))?;
-    let link_sel = selector("a")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse link selector".into()))?;
-    let img_sel = selector("img")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse img selector".into()))?;
-    let ep_sel = selector(".epz")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse epz selector".into()))?;
-    let genre_sel = selector(".genre-tag")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse genre-tag selector".into()))?;
-    let status_sel = selector(".status")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse status selector".into()))?;
-    let rating_sel = selector(".rating")
-        .ok_or_else(|| ScrapingError::Parse("Failed to parse rating selector".into()))?;
+    // Otakudesu search results live under `<ul class="chivsrc"><li>...`, one
+    // result per `<li>` with `<h2><a href="...">Title</a></h2>` plus a series
+    // of `<div class="set"><b>Label</b> : value</div>` rows (Status, Rating,
+    // Genre...). The old parser targeted the index layout (`.venz ul li`,
+    // `.thumbz h2.jdlflm`, `img`, `.epz`) which does NOT appear on the search
+    // page, so search silently returned 0 items.
+    let item_sel = selector(".chivsrc li")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse .chivsrc li selector".into()))?;
+    let title_link_sel = selector("h2 a")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse h2 a selector".into()))?;
+    let set_row_sel = selector(".set")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse .set selector".into()))?;
 
-    for element in document.select(&venz_sel) {
-        let title = text_from_or(&element, &title_sel, "");
-        let anime_url = attr_from_or(&element, &link_sel, "href", "");
+    let status_sel = selector(".set b:first-child, .set b")
+        .ok_or_else(|| ScrapingError::Parse("Failed to parse status label selector".into()))?;
+
+    for element in document.select(&item_sel) {
+        let title = text_from_or(&element, &title_link_sel, "");
+        let anime_url = attr_from_or(&element, &title_link_sel, "href", "");
         let slug = extract_slug(&anime_url);
-        let poster = attr_from_or(&element, &img_sel, "src", "");
-        let episode = text_from_or(&element, &ep_sel, "N/A");
 
+        if title.is_empty() {
+            continue;
+        }
+
+        // Extract label → value pairs from each `.set` row (e.g. "Status : Ongoing",
+        // "Rating : 8.0", "Genre : Action, Drama"). Falls back gracefully when the
+        // value is blank or the row label is absent.
+        let mut status = String::new();
+        let mut rating = String::new();
         let mut genres = Vec::new();
-        for genre_elem in element.select(&genre_sel) {
-            genres.push(text(&genre_elem));
+        for row in element.select(&set_row_sel) {
+            let row_text = text(&row);
+            let lower = row_text.to_lowercase();
+            if lower.contains("status") {
+                if let Some(label) = row.select(&status_sel).next() {
+                    let label_len = text(&label).len();
+                    status = clean_text(row_text[label_len..].to_string());
+                } else {
+                    status = clean_text(row_text.trim_start_matches("Status").to_string());
+                }
+            } else if lower.contains("rating") {
+                let label_len = row
+                    .select(&status_sel)
+                    .next()
+                    .map(|label| text(&label).len())
+                    .unwrap_or("Rating".len());
+                rating = clean_text(row_text[label_len..].to_string());
+            } else if lower.contains("genre") {
+                let label_len = row
+                    .select(&status_sel)
+                    .next()
+                    .map(|label| text(&label).len())
+                    .unwrap_or("Genre".len());
+                let raw = clean_text(row_text[label_len..].to_string());
+                genres = raw
+                    .split(',')
+                    .map(|g| g.trim().to_string())
+                    .filter(|g| !g.is_empty())
+                    .collect();
+            }
         }
 
-        let status = text_from_or(&element, &status_sel, "");
-        let rating = text_from_or(&element, &rating_sel, "");
-
-        if !title.is_empty() {
-            items.push(SearchAnimeItem {
-                title,
-                slug,
-                poster,
-                episode,
-                anime_url,
-                genres,
-                status,
-                rating,
-                description: String::new(),
-                r#type: String::new(),
-                season: String::new(),
-            });
-        }
+        items.push(SearchAnimeItem {
+            title,
+            slug,
+            poster: String::new(),
+            episode: String::new(),
+            anime_url,
+            genres,
+            status,
+            rating,
+            description: String::new(),
+            r#type: String::new(),
+            season: String::new(),
+        });
     }
 
     let pagination = parse_pagination(page, &document)?;
