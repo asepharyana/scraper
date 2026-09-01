@@ -19,12 +19,24 @@ pub struct WeebsParams {
     pub tag: Option<String>,
 }
 
-fn require<'a>(v: Option<&'a String>, name: &str) -> Result<String, AppError> {
+fn require(v: Option<&String>, name: &str) -> Result<String, AppError> {
     v.cloned()
         .ok_or_else(|| AppError::BadRequest(format!("Missing '{}' parameter", name)))
 }
 
 /// GET /weebs/anime-info?query=naruto
+#[utoipa::path(
+    get,
+    path = "/weebs/anime-info",
+    tag = "weebs",
+    operation_id = "weebs_anime_info_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn anime_info_handler(
     Query(p): Query<WeebsParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -33,6 +45,18 @@ pub async fn anime_info_handler(
 }
 
 /// GET /weebs/manga-info?query=one%20piece
+#[utoipa::path(
+    get,
+    path = "/weebs/manga-info",
+    tag = "weebs",
+    operation_id = "weebs_manga_info_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn manga_info_handler(
     Query(p): Query<WeebsParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -41,6 +65,18 @@ pub async fn manga_info_handler(
 }
 
 /// GET /weebs/whatanime?url=<image-url>
+#[utoipa::path(
+    get,
+    path = "/weebs/whatanime",
+    tag = "weebs",
+    operation_id = "weebs_whatanime_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn whatanime_handler(
     Query(p): Query<WeebsParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -49,6 +85,18 @@ pub async fn whatanime_handler(
 }
 
 /// GET /weebs/sfw-waifu?tag=waifu
+#[utoipa::path(
+    get,
+    path = "/weebs/sfw-waifu",
+    tag = "weebs",
+    operation_id = "weebs_sfw_waifu_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn sfw_waifu_handler(
     Query(p): Query<WeebsParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -57,6 +105,18 @@ pub async fn sfw_waifu_handler(
 }
 
 /// GET /weebs/nsfw-waifu?tag=waifu
+#[utoipa::path(
+    get,
+    path = "/weebs/nsfw-waifu",
+    tag = "weebs",
+    operation_id = "weebs_nsfw_waifu_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn nsfw_waifu_handler(
     Query(p): Query<WeebsParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {

@@ -14,6 +14,18 @@ use crate::application::uploader as use_cases;
 use crate::presentation::error::AppError;
 
 /// POST /uploader/ryzencdn — accept a multipart file upload.
+#[utoipa::path(
+    post,
+    path = "/uploader/ryzencdn",
+    tag = "uploader",
+    operation_id = "uploader_ryzencdn_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn ryzencdn_handler(mut multipart: Multipart) -> Result<Json<Value>, AppError> {
     // Read the first file field.
     let mut file_name = String::from("");
@@ -47,12 +59,24 @@ pub async fn ryzencdn_handler(mut multipart: Multipart) -> Result<Json<Value>, A
 }
 
 /// GET /uploader/file/:name — serve an uploaded file.
+#[utoipa::path(
+    get,
+    path = "/uploader/file/:name",
+    tag = "uploader",
+    operation_id = "uploader_serve_file_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn serve_file_handler(Path(name): Path<String>) -> Result<Response<Body>, AppError> {
     let (bytes, mime) = use_cases::serve(&name)?;
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from(bytes))
-        .unwrap())
+        .map_err(|e| AppError::Internal(format!("build response: {e}")))
 }

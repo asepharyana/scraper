@@ -7,17 +7,15 @@
 use axum::extract::Query;
 use axum::Json;
 use serde::Deserialize;
+use serde_json::Value;
+use utoipa::IntoParams;
 
 use crate::application::downloader as use_cases;
 use crate::presentation::dto::downloader::DownloadResponse;
 use crate::presentation::error::AppError;
 
-// ============================================================================
-// DownloadParams + response
-// ============================================================================
-
 /// Request params for downloader endpoints.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct DownloadParams {
     pub url: String,
     pub cookies: Option<String>,
@@ -25,11 +23,24 @@ pub struct DownloadParams {
     pub quality: Option<String>,
 }
 
-// ============================================================================
+// ========================================================================
 // Handlers
-// ============================================================================
+// ========================================================================
 
-/// All-in-one downloader with auto-detection.
+/// All-in-one auto-detect downloader.
+/// `/download?url=...`
+#[utoipa::path(
+    get,
+    path = "/download",
+    tag = "download",
+    operation_id = "dl_download",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -37,10 +48,23 @@ pub async fn download(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Platform detection endpoint.
+/// Detect platform from URL.
+/// `/detect-platform?url=...`
+#[utoipa::path(
+    get,
+    path = "/detect-platform",
+    tag = "download",
+    operation_id = "dl_detect_platform_handler",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn detect_platform_handler(
     Query(params): Query<DownloadParams>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let platform = use_cases::detect_platform(&params.url);
     Ok(Json(serde_json::json!({
         "platform": platform,
@@ -48,8 +72,20 @@ pub async fn detect_platform_handler(
     })))
 }
 
-/// Generate handler for each downloader platform.
-/// Handler for _instagram.
+/// Download Instagram media.
+/// `/download/instagram?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/instagram",
+    tag = "download",
+    operation_id = "dl_download_instagram",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_instagram(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -57,7 +93,20 @@ pub async fn download_instagram(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _facebook.
+/// Download Facebook video.
+/// `/download/facebook?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/facebook",
+    tag = "download",
+    operation_id = "dl_download_facebook",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_facebook(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -65,7 +114,20 @@ pub async fn download_facebook(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _tiktok.
+/// Download TikTok video.
+/// `/download/tiktok?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/tiktok",
+    tag = "download",
+    operation_id = "dl_download_tiktok",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_tiktok(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -73,7 +135,20 @@ pub async fn download_tiktok(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _youtube.
+/// Download YouTube video.
+/// `/download/youtube?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/youtube",
+    tag = "download",
+    operation_id = "dl_download_youtube",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_youtube(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -83,7 +158,20 @@ pub async fn download_youtube(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _youtube_mp3.
+/// Convert YouTube to MP3.
+/// `/download/youtube/mp3?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/youtube/mp3",
+    tag = "download",
+    operation_id = "dl_download_youtube_mp3",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_youtube_mp3(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -91,7 +179,20 @@ pub async fn download_youtube_mp3(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _spotify.
+/// Download Spotify track.
+/// `/download/spotify?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/spotify",
+    tag = "download",
+    operation_id = "dl_download_spotify",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_spotify(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -99,7 +200,20 @@ pub async fn download_spotify(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _twitter.
+/// Download Twitter/X media.
+/// `/download/twitter?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/twitter",
+    tag = "download",
+    operation_id = "dl_download_twitter",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_twitter(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -107,7 +221,20 @@ pub async fn download_twitter(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _pinterest.
+/// Download Pinterest pin.
+/// `/download/pinterest?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/pinterest",
+    tag = "download",
+    operation_id = "dl_download_pinterest",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_pinterest(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -115,7 +242,20 @@ pub async fn download_pinterest(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _mega.
+/// Download from Mega.
+/// `/download/mega?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/mega",
+    tag = "download",
+    operation_id = "dl_download_mega",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_mega(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -123,7 +263,20 @@ pub async fn download_mega(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _terabox.
+/// Download from Terabox.
+/// `/download/terabox?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/terabox",
+    tag = "download",
+    operation_id = "dl_download_terabox",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_terabox(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -131,7 +284,20 @@ pub async fn download_terabox(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _gdrive.
+/// Download from Google Drive.
+/// `/download/gdrive?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/gdrive",
+    tag = "download",
+    operation_id = "dl_download_gdrive",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_gdrive(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -139,7 +305,20 @@ pub async fn download_gdrive(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _mediafire.
+/// Download from MediaFire.
+/// `/download/mediafire?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/mediafire",
+    tag = "download",
+    operation_id = "dl_download_mediafire",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_mediafire(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -147,7 +326,20 @@ pub async fn download_mediafire(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _pixeldrain.
+/// Download from Pixeldrain.
+/// `/download/pixeldrain?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/pixeldrain",
+    tag = "download",
+    operation_id = "dl_download_pixeldrain",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_pixeldrain(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -155,7 +347,20 @@ pub async fn download_pixeldrain(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _threads.
+/// Download Threads media.
+/// `/download/threads?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/threads",
+    tag = "download",
+    operation_id = "dl_download_threads",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_threads(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -163,7 +368,20 @@ pub async fn download_threads(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _doodstream.
+/// Download from DoodStream.
+/// `/download/doodstream?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/doodstream",
+    tag = "download",
+    operation_id = "dl_download_doodstream",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_doodstream(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -171,7 +389,20 @@ pub async fn download_doodstream(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _krakenfiles.
+/// Download from KrakenFiles.
+/// `/download/krakenfiles?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/krakenfiles",
+    tag = "download",
+    operation_id = "dl_download_krakenfiles",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_krakenfiles(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -179,7 +410,20 @@ pub async fn download_krakenfiles(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _danbooru.
+/// Download from Danbooru.
+/// `/download/danbooru?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/danbooru",
+    tag = "download",
+    operation_id = "dl_download_danbooru",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_danbooru(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -187,7 +431,20 @@ pub async fn download_danbooru(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _soundcloud.
+/// Download SoundCloud track.
+/// `/download/soundcloud?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/soundcloud",
+    tag = "download",
+    operation_id = "dl_download_soundcloud",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_soundcloud(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -195,7 +452,20 @@ pub async fn download_soundcloud(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _dailymotion.
+/// Download Dailymotion video.
+/// `/download/dailymotion?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/dailymotion",
+    tag = "download",
+    operation_id = "dl_download_dailymotion",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_dailymotion(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -203,7 +473,20 @@ pub async fn download_dailymotion(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _reddit.
+/// Download Reddit media.
+/// `/download/reddit?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/reddit",
+    tag = "download",
+    operation_id = "dl_download_reddit",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_reddit(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -211,7 +494,20 @@ pub async fn download_reddit(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _streamable.
+/// Download Streamable video.
+/// `/download/streamable?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/streamable",
+    tag = "download",
+    operation_id = "dl_download_streamable",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_streamable(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -219,7 +515,20 @@ pub async fn download_streamable(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _videy.
+/// Download Videy video.
+/// `/download/videy?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/videy",
+    tag = "download",
+    operation_id = "dl_download_videy",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_videy(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
@@ -227,7 +536,20 @@ pub async fn download_videy(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _bilibili.
+/// Download Bilibili video.
+/// `/download/bilibili?url=...`
+#[utoipa::path(
+    get,
+    path = "/download/bilibili",
+    tag = "download",
+    operation_id = "dl_download_bilibili",
+    params(DownloadParams),
+    responses(
+        (status = 200, description = "Download result", body = DownloadResponse),
+        (status = 400, description = "Bad URL or platform"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
 pub async fn download_bilibili(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {

@@ -19,17 +19,41 @@ pub struct SearchParams {
     pub city: Option<String>,
 }
 
-fn require<'a>(v: Option<&'a String>, name: &str) -> Result<String, AppError> {
+fn require(v: Option<&String>, name: &str) -> Result<String, AppError> {
     v.cloned()
         .ok_or_else(|| AppError::BadRequest(format!("Missing '{}' parameter", name)))
 }
 
 /// GET /search/bmkg
+#[utoipa::path(
+    get,
+    path = "/search/bmkg",
+    tag = "search",
+    operation_id = "search_bmkg_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn bmkg_handler() -> Result<(StatusCode, Json<Value>), AppError> {
     Ok((StatusCode::OK, Json(use_cases::bmkg().await?)))
 }
 
 /// GET /search/jadwal-sholat?kota=jakarta
+#[utoipa::path(
+    get,
+    path = "/search/jadwal-sholat",
+    tag = "search",
+    operation_id = "search_jadwal_sholat_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn jadwal_sholat_handler(
     Query(p): Query<SearchParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -38,6 +62,18 @@ pub async fn jadwal_sholat_handler(
 }
 
 /// GET /search/weather?city=jakarta
+#[utoipa::path(
+    get,
+    path = "/search/weather",
+    tag = "search",
+    operation_id = "search_weather_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn weather_handler(
     Query(p): Query<SearchParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -46,6 +82,18 @@ pub async fn weather_handler(
 }
 
 /// GET /search/google?query=rust
+#[utoipa::path(
+    get,
+    path = "/search/google",
+    tag = "search",
+    operation_id = "search_google_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn google_handler(
     Query(p): Query<SearchParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -54,6 +102,18 @@ pub async fn google_handler(
 }
 
 /// GET /search/yt?query=rickroll
+#[utoipa::path(
+    get,
+    path = "/search/yt",
+    tag = "search",
+    operation_id = "search_yt_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn yt_handler(
     Query(p): Query<SearchParams>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {

@@ -23,6 +23,18 @@ pub struct AiParams {
 }
 
 /// GET /ai/chat?text=...&prompt=...&model=...
+#[utoipa::path(
+    get,
+    path = "/ai/chat",
+    tag = "ai",
+    operation_id = "ai_chat_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn chat_handler(Query(params): Query<AiParams>) -> Result<Json<Value>, AppError> {
     let text = params
         .text
@@ -32,6 +44,18 @@ pub async fn chat_handler(Query(params): Query<AiParams>) -> Result<Json<Value>,
 }
 
 /// GET /ai/gemini?text=...&prompt=...&image_url=...
+#[utoipa::path(
+    get,
+    path = "/ai/gemini",
+    tag = "ai",
+    operation_id = "ai_gemini_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn gemini_handler(Query(params): Query<AiParams>) -> Result<Json<Value>, AppError> {
     let text = params
         .text
@@ -42,6 +66,18 @@ pub async fn gemini_handler(Query(params): Query<AiParams>) -> Result<Json<Value
 }
 
 /// GET /ai/image?prompt=...&model=...&width=...&height=... — returns image bytes.
+#[utoipa::path(
+    get,
+    path = "/ai/image",
+    tag = "ai",
+    operation_id = "ai_image_handler",
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Bad Request"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+
 pub async fn image_handler(Query(params): Query<AiParams>) -> Result<Response<Body>, AppError> {
     let prompt = params
         .prompt
@@ -59,9 +95,9 @@ pub async fn image_handler(Query(params): Query<AiParams>) -> Result<Response<Bo
     } else {
         "application/octet-stream"
     };
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .body(Body::from(bytes))
-        .unwrap())
+        .map_err(|e| AppError::Internal(format!("build response: {e}")))
 }
