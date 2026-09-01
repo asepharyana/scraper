@@ -324,6 +324,31 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/search/yt",
             axum::routing::get(crate::presentation::handler::search::yt_handler),
         )
+        // Tool routes
+        .route(
+            "/tool/whois",
+            axum::routing::get(crate::presentation::handler::tools::whois_handler),
+        )
+        .route(
+            "/tool/iplocation",
+            axum::routing::get(crate::presentation::handler::tools::ip_location_handler),
+        )
+        .route(
+            "/tool/tinyurl",
+            axum::routing::get(crate::presentation::handler::tools::tinyurl_handler),
+        )
+        .route(
+            "/tool/check-hosting",
+            axum::routing::get(crate::presentation::handler::tools::check_hosting_handler),
+        )
+        .route(
+            "/tool/hargapangan",
+            axum::routing::get(crate::presentation::handler::tools::hargapangan_handler),
+        )
+        .route(
+            "/tool/cek-resi",
+            axum::routing::get(crate::presentation::handler::tools::cek_resi_handler),
+        )
         // Health
         .route(
             "/health",
