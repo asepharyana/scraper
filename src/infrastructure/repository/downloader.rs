@@ -1174,7 +1174,7 @@ pub async fn fetch_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> 
                 result.media.push(MediaItem {
                     url: url.unwrap().to_string(),
                     quality: fmt.get("format_note").and_then(|v| v.as_str()).map(|s| s.to_string())
-                        .or_else(|| fmt.get("height").and_then(|v| v.as_u64()).map(|h| format!("{}p", h))),
+                        .or_else(|| fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string())),
                     file_type: fmt.get("vcodec").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "none")
                         .map(|_| MediaType::Video),
                     extension: fmt.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -1195,10 +1195,10 @@ pub async fn fetch_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> 
 // ============================================================================
 // SoundCloud downloader
 // ============================================================================
-// ============================================================================
 
 pub async fn fetch_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let data = run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await?;
+    // yt-dlp --extract-audio requires a download; use --dump-json for direct URL
+    let data = run_ytdlp_json(url, &[]).await?;
 
     let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
     let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -2037,7 +2037,7 @@ pub async fn fetch_mediafire(url: &str) -> Result<DownloadResult, ScrapingError>
             USER_AGENT,
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         )
-        .header("accept", "text/html")
+        .header("accept", "text/html,application/xhtml+xml")
         .timeout(Duration::from_secs(20))
         .send()
         .await
