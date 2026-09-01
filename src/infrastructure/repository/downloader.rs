@@ -770,9 +770,144 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
 
     Ok(result)
 }
+/// TikTok via embed-page scraping (primary method).
+/// Scrapes `https://www.tiktok.com/embed/v2/{video_id}` HTML and extracts the
+/// direct `v16m.tiktokcdn.com` MP4 URL from the `<video data-testid="play-video">` tag.
+/// This works server-side (no auth) for active videos while the main site/API are
+/// Cloudflare-blocked. Verified: returns a real downloadable MP4 (200/206, video/mp4).
+async fn fetch_tiktok_embed(url: &str) -> Result<DownloadResult, ScrapingError> {
+    // Resolve short URLs (vm/vt.tiktok.com) to the long form to get a video ID
+    let resolved_url = resolve_tiktok_url(url).await?;
+
+    let video_id = regex::Regex::new(r"/video/(\d+)")
+        .unwrap()
+        .captures(&resolved_url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| ScrapingError::Http("Invalid TikTok URL, no video ID".to_string()))?;
+
+    let client = http_client();
+    let html = client
+        .client()
+        .get(format!("https://www.tiktok.com/embed/v2/{}", video_id))
+        .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .header("accept-language", "en-US,en;q=0.9")
+        .timeout(Duration::from_secs(25))
+        .send()
+        .await
+        .map_err(|e| ScrapingError::Http(format!("TikTok embed fetch failed: {}", e)))?
+        .text()
+        .await
+        .map_err(|e| ScrapingError::Http(format!("TikTok embed read failed: {}", e)))?;
+
+    // Extract <video data-testid="play-video" src="..."> (prefer the clean one)
+    let mp4_url = {
+        let mut found: Option<String> = None;
+        for pat in [
+            r#"<video[^>]*data-testid="play-video"[^>]*src="([^"]+)""#,
+            r#"<video[^>]*src="([^"]+)"[^>]*data-testid="play-video""#,
+            r#"<video[^>]*src="([^"]+)""#,
+        ] {
+            if let Some(m) = regex::Regex::new(pat).unwrap().captures(&html) {
+                if let Some(url) = m.get(1) {
+                    // prefer a *.mp4 URL over thumbnails/images
+                    let cand = url.as_str().replace("&amp;", "&");
+                    if cand.contains("tiktokcdn") || cand.ends_with(".mp4") {
+                        found = Some(cand);
+                        break;
+                    }
+                    if found.is_none() {
+                        found = Some(cand);
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found
+    };
+
+    let mp4_url =
+        mp4_url.ok_or_else(|| ScrapingError::Http("No video URL in TikTok embed".to_string()))?;
+
+    // Extract title + author from <title> and oEmbed-like metadata if available
+    let (title, author) = {
+        let mut title = None;
+        let mut author = None;
+        if let Some(m) = regex::Regex::new(r#"<title[^>]*>([^<]+)</title>"#)
+            .unwrap()
+            .captures(&html)
+        {
+            let raw = m
+                .get(1)
+                .map(|s| s.as_str().trim().to_string())
+                .unwrap_or_default();
+            if !raw.is_empty() && !raw.contains("TikTok") {
+                title = Some(raw);
+            }
+        }
+        if let Some(m) = regex::Regex::new(r#"data-author-name="([^"]+)""#)
+            .unwrap()
+            .captures(&html)
+        {
+            author = m.get(1).map(|s| s.as_str().to_string());
+        }
+        (title, author)
+    };
+
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.provider = Some("tiktok-embed".to_string());
+
+    result.media.push(MediaItem {
+        url: mp4_url.clone(),
+        quality: Some("hd".to_string()),
+        file_type: Some(MediaType::Video),
+        extension: Some("mp4".to_string()),
+        thumbnail: None,
+        file_size: None,
+        size_bytes: None,
+        frame_width: None,
+        frame_height: None,
+        note: None,
+    });
+
+    Ok(result)
+}
+
+/// Resolve TikTok short URLs (vm/vt.tiktok.com/xxx) to the canonical long URL.
+async fn resolve_tiktok_url(url: &str) -> Result<String, ScrapingError> {
+    if !url.contains("tiktok.com") {
+        return Ok(url.to_string());
+    }
+    // If it already has /video/<id>, return as-is
+    if regex::Regex::new(r"/video/\d+").unwrap().is_match(url) {
+        return Ok(url.to_string());
+    }
+    // Short URL: follow redirects to get the canonical URL
+    let client = http_client();
+    let resp = client
+        .client()
+        .get(url)
+        .header(USER_AGENT, "Mozilla/5.0")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| ScrapingError::Http(format!("TikTok redirect resolve failed: {}", e)))?;
+    Ok(resp.url().to_string())
+}
+
 pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
     if extract_tiktok_id(url).is_none() {
         return Ok(DownloadResult::error("Invalid URL"));
+    }
+
+    // Primary: scrape the embed page for the direct MP4 (works server-side)
+    if let Ok(embed_result) = fetch_tiktok_embed(url).await {
+        if !embed_result.media.is_empty() {
+            return Ok(embed_result);
+        }
     }
 
     // Try tikwm API first; fall back to yt-dlp if blocked
