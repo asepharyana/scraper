@@ -57,7 +57,11 @@ fn extract_tiktok_id(url: &str) -> Option<String> {
     // Handle short URLs like vm.tiktok.com/ZM8s5qJ6t — resolve redirect first
     if url.contains("vm.tiktok.com") || url.contains("vt.tiktok.com") {
         let re = regex::Regex::new(r"/([A-Za-z0-9_-]+)$").ok()?;
-        let short_code = re.captures(url).and_then(|c| c.get(1))?.as_str().to_string();
+        let short_code = re
+            .captures(url)
+            .and_then(|c| c.get(1))?
+            .as_str()
+            .to_string();
         return Some(short_code);
     }
     // TikTok URLs contain an 18-20 digit video ID in the path
@@ -99,9 +103,12 @@ fn find_ytdlp() -> Option<String> {
 /// Run yt-dlp --dump-json and return the parsed JSON value.
 /// Uses spawn + manual stdout reading to avoid pipe buffer truncation
 /// on large outputs (>64KB on Linux default pipe buffer).
-async fn run_ytdlp_json(url: &str, extra_args: &[&str]) -> Result<serde_json::Value, ScrapingError> {
-    let ytdlp = find_ytdlp()
-        .ok_or_else(|| ScrapingError::Http("yt-dlp binary not found".to_string()))?;
+async fn run_ytdlp_json(
+    url: &str,
+    extra_args: &[&str],
+) -> Result<serde_json::Value, ScrapingError> {
+    let ytdlp =
+        find_ytdlp().ok_or_else(|| ScrapingError::Http("yt-dlp binary not found".to_string()))?;
 
     let extra_args_owned: Vec<String> = extra_args.iter().map(|s| s.to_string()).collect();
 
@@ -113,6 +120,8 @@ async fn run_ytdlp_json(url: &str, extra_args: &[&str]) -> Result<serde_json::Va
                 "--dump-json".to_string(),
                 "--no-warnings".to_string(),
                 "--no-check-certificates".to_string(),
+                "--user-agent".to_string(),
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string(),
             ];
             cmd_args.extend(extra_args_owned.iter().cloned());
             cmd_args.push(url_owned);
@@ -158,6 +167,117 @@ async fn run_ytdlp_json(url: &str, extra_args: &[&str]) -> Result<serde_json::Va
 
     serde_json::from_str(json_line)
         .map_err(|e| ScrapingError::Http(format!("yt-dlp JSON parse failed: {}", e)))
+}
+
+/// Run Playwright-based browser scraper as fallback when yt-dlp is blocked.
+/// Uses headless Chromium to scrape video URLs from anti-bot-protected sites.
+async fn run_playwright_scraper(
+    url: &str,
+    platform: &str,
+) -> Result<serde_json::Value, ScrapingError> {
+    let script = env!("CARGO_MANIFEST_DIR");
+    let scraper_script = format!("{}/scrape_media.py", script);
+
+    // Find a Python interpreter that has playwright installed.
+    // The system `python3` may resolve to a different interpreter for the
+    // service user, so probe known venv interpreters first.
+    let python_candidates = [
+        "/home/code/hermes-agent/.venv/bin/python3",
+        "/usr/bin/python3",
+        "python3",
+    ];
+    let python_bin = python_candidates
+        .iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .args(["-c", "import playwright"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "python3".to_string());
+
+    let (stdout_str, stderr_str, exit_code) = tokio::task::spawn_blocking({
+        let url_owned = url.to_string();
+        let platform_owned = platform.to_string();
+        let script_owned = scraper_script.clone();
+        let python_owned = python_bin.clone();
+        move || -> Result<(String, String, i32), ScrapingError> {
+            let output = std::process::Command::new(&python_owned)
+                .arg(&script_owned)
+                .arg(&url_owned)
+                .arg(&platform_owned)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .map_err(|e| ScrapingError::Http(format!("playwright spawn failed: {}", e)))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            Ok((stdout, stderr, output.status.code().unwrap_or(-1)))
+        }
+    })
+    .await
+    .map_err(|e| ScrapingError::Http(format!("playwright task error: {}", e)))??;
+
+    if exit_code != 0 {
+        return Err(ScrapingError::Http(format!(
+            "playwright scraper failed: {}",
+            stderr_str.trim().lines().last().unwrap_or("unknown error")
+        )));
+    }
+
+    serde_json::from_str(&stdout_str)
+        .map_err(|e| ScrapingError::Http(format!("playwright JSON parse failed: {}", e)))
+}
+
+/// Convert a Playwright scraper JSON result (from scrape_media.py) into DownloadResult.
+fn playwright_to_download_result(data: &serde_json::Value) -> DownloadResult {
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut result = DownloadResult::success(title);
+    result.provider = data
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(medias) = data.get("media").and_then(|v| v.as_array()) {
+        for m in medias {
+            let item = MediaItem {
+                url: m
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                quality: None,
+                file_type: m.get("ext").and_then(|v| v.as_str()).and_then(|e| match e {
+                    "mp4" | "m3u8" => Some(MediaType::Video),
+                    "mp3" | "m4a" => Some(MediaType::Audio),
+                    _ => Some(MediaType::Video),
+                }),
+                extension: m.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                thumbnail: None,
+                file_size: None,
+                size_bytes: None,
+                frame_width: None,
+                frame_height: None,
+                note: m
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+            result.media.push(item);
+        }
+    }
+
+    if result.media.is_empty() {
+        result.message = Some("No download URLs found".to_string());
+    }
+    result
 }
 
 pub struct DownloaderRepository;
@@ -553,10 +673,10 @@ async fn detect_media_type(url: &str) -> MediaType {
 }
 
 /// SnapSave parser — extracts Instagram/Facebook media via snapsave.app.
-/// Uses downr.org as fallback for robustness.
+/// Uses downr.org as fallback for robustness, then Playwright browser scraping.
 pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, ScrapingError> {
     // Validate Instagram/Facebook URL
-    let valid_fb = regex::Regex::new(r"https?://(web\.|www\.|m\.)?(facebook|fb)\.(com|watch)\S+")
+    let valid_fb = regex::Regex::new(r"https?://(web\.|www\.|m\.)(facebook|fb)\.(com|watch)\S+")
         .unwrap()
         .is_match(url);
     let valid_ig =
@@ -570,8 +690,68 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
         ));
     }
 
-    // Delegate to universal downr.org scraper for robustness
-    fetch_all_in_one(url).await
+    // Try downr.org first
+    match fetch_all_in_one(url).await {
+        Ok(result) if !result.media.is_empty() => return Ok(result),
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!(
+                "downr.org failed for {}: {}, trying Playwright fallback",
+                url, e
+            );
+        }
+    }
+
+    // Fallback: use Playwright browser scraping to extract video URLs
+    let platform = if valid_ig { "instagram" } else { "facebook" };
+    let data = run_playwright_scraper(url, platform).await?;
+
+    // Build result from Playwright scraper output
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut result = DownloadResult::success(title);
+    result.provider = data
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let media_arr = data.get("media").and_then(|v| v.as_array());
+    if let Some(medias) = media_arr {
+        for m in medias {
+            let item = MediaItem {
+                url: m
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                quality: None,
+                file_type: m.get("ext").and_then(|v| v.as_str()).and_then(|e| match e {
+                    "mp4" | "m3u8" => Some(MediaType::Video),
+                    "mp3" | "m4a" => Some(MediaType::Audio),
+                    _ => Some(MediaType::Video),
+                }),
+                extension: m.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                thumbnail: None,
+                file_size: None,
+                size_bytes: None,
+                frame_width: None,
+                frame_height: None,
+                note: None,
+            };
+            result.media.push(item);
+        }
+    }
+
+    if result.media.is_empty() {
+        return Ok(DownloadResult::error(format!(
+            "Failed to extract media from {} — server IP may be blocked by anti-bot protection",
+            platform
+        )));
+    }
+
+    Ok(result)
 }
 pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
     if extract_tiktok_id(url).is_none() {
@@ -597,12 +777,13 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
     // Check if tikwm returned an error (e.g. Cloudflare blocked)
     let tikwm_code = resp_json.get("code");
     let tikwm_msg = resp_json.get("msg").and_then(|v| v.as_str());
-    
+
     if tikwm_code == Some(&serde_json::Value::Number(serde_json::Number::from(0)))
         && tikwm_msg != Some("Url parsing is failed! Please check url.")
     {
         let mut result = DownloadResult::success(
-            resp_json.get("data")
+            resp_json
+                .get("data")
                 .and_then(|d| d.get("title"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
@@ -619,17 +800,29 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        if let Some(plays) = resp_json.get("data").and_then(|d| d.get("plays").and_then(|v| v.as_array())) {
+        if let Some(plays) = resp_json
+            .get("data")
+            .and_then(|d| d.get("plays").and_then(|v| v.as_array()))
+        {
             for play in plays {
                 if let Some(play_url) = play.get("url").and_then(|v| v.as_str()) {
                     result.media.push(MediaItem {
                         url: play_url.to_string(),
-                        quality: play.get("quality").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        quality: play
+                            .get("quality")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                         file_type: Some(MediaType::Video),
                         extension: Some("mp4".to_string()),
                         thumbnail: None,
-                        file_size: play.get("size").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                        size_bytes: play.get("size").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
+                        file_size: play
+                            .get("size")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        size_bytes: play
+                            .get("size")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok()),
                         frame_width: None,
                         frame_height: None,
                         note: None,
@@ -646,40 +839,136 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
     }
 
     // Fallback: use yt-dlp
-    let data = run_ytdlp_json(url, &[]).await?;
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    match run_ytdlp_json(url, &[]).await {
+        Ok(data) => {
+            let title = data
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let author = data
+                .get("uploader")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let thumbnail = data
+                .get("thumbnail")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
-    let mut result = DownloadResult::success(title);
-    result.author = author;
-    result.thumbnail = thumbnail;
-    result.provider = Some("yt-dlp".to_string());
+            let mut result = DownloadResult::success(title);
+            result.author = author;
+            result.thumbnail = thumbnail;
+            result.provider = Some("yt-dlp".to_string());
 
-    if let Some(formats) = data.get("formats").and_then(|v| v.as_array()) {
-        for fmt in formats {
-            if let Some(fmt_url) = fmt.get("url").and_then(|v| v.as_str()) {
-                result.media.push(MediaItem {
-                    url: fmt_url.to_string(),
-                    quality: fmt.get("format_note").and_then(|v| v.as_str()).map(|s| s.to_string())
-                        .or_else(|| fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string())),
-                    file_type: fmt.get("vcodec").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "none")
-                        .map(|_| MediaType::Video),
-                    extension: fmt.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    thumbnail: None,
-                    file_size: fmt.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
-                    size_bytes: fmt.get("filesize").and_then(|v| v.as_u64()),
-                    frame_width: fmt.get("width").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    frame_height: fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    note: None,
-                });
+            if let Some(formats) = data.get("formats").and_then(|v| v.as_array()) {
+                for fmt in formats {
+                    if let Some(fmt_url) = fmt.get("url").and_then(|v| v.as_str()) {
+                        result.media.push(MediaItem {
+                            url: fmt_url.to_string(),
+                            quality: fmt
+                                .get("format_note")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    fmt.get("height")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                }),
+                            file_type: fmt
+                                .get("vcodec")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty() && *s != "none")
+                                .map(|_| MediaType::Video),
+                            extension: fmt
+                                .get("ext")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            thumbnail: None,
+                            file_size: fmt
+                                .get("filesize")
+                                .and_then(|v| v.as_u64())
+                                .map(format_filesize),
+                            size_bytes: fmt.get("filesize").and_then(|v| v.as_u64()),
+                            frame_width: fmt
+                                .get("width")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            frame_height: fmt
+                                .get("height")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            note: None,
+                        });
+                    }
+                }
+            }
+
+            if result.media.is_empty() {
+                result.message = Some("No download URLs found".to_string());
+            }
+            return Ok(result);
+        }
+        Err(e) => {
+            eprintln!("yt-dlp failed for TikTok, trying Playwright: {}", e);
+
+            // Fallback: use Playwright browser scraping
+            match run_playwright_scraper(url, "tiktok").await {
+                Ok(data) => {
+                    let title = data
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let mut result = DownloadResult::success(title);
+                    result.provider = data
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if let Some(medias) = data.get("media").and_then(|v| v.as_array()) {
+                        for m in medias {
+                            let item = MediaItem {
+                                url: m
+                                    .get("url")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                quality: None,
+                                file_type: m.get("ext").and_then(|v| v.as_str()).and_then(|e| {
+                                    match e {
+                                        "mp4" | "m3u8" => Some(MediaType::Video),
+                                        "mp3" | "m4a" => Some(MediaType::Audio),
+                                        _ => Some(MediaType::Video),
+                                    }
+                                }),
+                                extension: m
+                                    .get("ext")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                thumbnail: None,
+                                file_size: None,
+                                size_bytes: None,
+                                frame_width: None,
+                                frame_height: None,
+                                note: None,
+                            };
+                            result.media.push(item);
+                        }
+                    }
+
+                    if result.media.is_empty() {
+                        result.message = Some("No download URLs found".to_string());
+                    }
+                    return Ok(result);
+                }
+                Err(_) => {
+                    // All methods failed
+                    return Err(ScrapingError::Http(
+                        "All TikTok download methods failed (tikwm API blocked, yt-dlp blocked, Playwright blocked)".to_string()
+                    ));
+                }
             }
         }
     }
-
-    Ok(result)
 }
-
 
 /// TikTok v2 — uses douyin.wtf API
 pub async fn fetch_tiktok_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
@@ -762,10 +1051,22 @@ pub async fn fetch_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingErro
 
     let data = run_ytdlp_json(url, &["-f", "bestaudio/best"]).await?;
 
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
 
     let mut result = DownloadResult::success(title);
     result.author = author;
@@ -773,7 +1074,9 @@ pub async fn fetch_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingErro
     result.duration = duration;
     result.provider = Some("yt-dlp".to_string());
 
-    let download_url = data.get("url").and_then(|v| v.as_str())
+    let download_url = data
+        .get("url")
+        .and_then(|v| v.as_str())
         .or_else(|| {
             data.get("formats")
                 .and_then(|v| v.as_array())
@@ -784,11 +1087,20 @@ pub async fn fetch_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingErro
 
     result.media.push(MediaItem {
         url: download_url.to_string(),
-        quality: Some(format!("{}kbps", data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128))),
+        quality: Some(format!(
+            "{}kbps",
+            data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128)
+        )),
         file_type: Some(MediaType::Audio),
         extension: Some("mp3".to_string()),
-        thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+        thumbnail: data
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        file_size: data
+            .get("filesize")
+            .and_then(|v| v.as_u64())
+            .map(format_filesize),
         size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
         frame_width: None,
         frame_height: None,
@@ -803,13 +1115,28 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
     extract_youtube_id(url)
         .ok_or_else(|| ScrapingError::Http("Invalid YouTube URL".to_string()))?;
 
-    let fmt = format!("bestvideo[height<={}]/best+bestaudio/best", quality.trim_end_matches('p'));
+    let fmt = format!(
+        "bestvideo[height<={}]/best+bestaudio/best",
+        quality.trim_end_matches('p')
+    );
     let data = run_ytdlp_json(url, &["-f", &fmt]).await?;
 
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
 
     let mut result = DownloadResult::success(title);
     result.author = author;
@@ -826,7 +1153,9 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
                 f.get("url").and_then(|v| v.as_str()),
                 f.get("ext").and_then(|v| v.as_str()),
             ) {
-                if ext_val == "mhtml" { continue; }
+                if ext_val == "mhtml" {
+                    continue;
+                }
                 let url_string = furl.to_string();
                 if seen.insert(url_string.clone()) {
                     let fmt_type = if ext_val == "mp4" || ext_val == "webm" || ext_val == "mkv" {
@@ -842,11 +1171,23 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
                         quality: Some(q),
                         file_type: Some(fmt_type),
                         extension: Some(ext_val.to_string()),
-                        thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                        file_size: f.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                        thumbnail: data
+                            .get("thumbnail")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        file_size: f
+                            .get("filesize")
+                            .and_then(|v| v.as_u64())
+                            .map(format_filesize),
                         size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
-                        frame_width: f.get("width").and_then(|v| v.as_u64()).map(|w| w.to_string()),
-                        frame_height: f.get("height").and_then(|v| v.as_u64()).map(|h| h.to_string()),
+                        frame_width: f
+                            .get("width")
+                            .and_then(|v| v.as_u64())
+                            .map(|w| w.to_string()),
+                        frame_height: f
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .map(|h| h.to_string()),
                         note: None,
                     });
                 }
@@ -860,9 +1201,20 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
                 url: url.to_string(),
                 quality: Some(format!("{}p", quality.trim_end_matches('p'))),
                 file_type: Some(MediaType::Video),
-                extension: Some(data.get("ext").and_then(|v| v.as_str()).unwrap_or("mp4").to_string()),
-                thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                extension: Some(
+                    data.get("ext")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("mp4")
+                        .to_string(),
+                ),
+                thumbnail: data
+                    .get("thumbnail")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                file_size: data
+                    .get("filesize")
+                    .and_then(|v| v.as_u64())
+                    .map(format_filesize),
                 size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
                 frame_width: None,
                 frame_height: None,
@@ -892,10 +1244,22 @@ pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
     // Use yt-dlp to extract track info and download URL
     let data = run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await?;
 
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("artist").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("artist")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
 
     let mut result = DownloadResult::success(title);
     result.author = author;
@@ -903,13 +1267,12 @@ pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
     result.duration = duration;
     result.provider = Some(format!("spotify-yt-dlp ({})", resource_type));
 
-    let download_url = data.get("url").and_then(|v| v.as_str())
-        .or_else(|| {
-            data.get("formats")
-                .and_then(|v| v.as_array())
-                .and_then(|f| f.first())
-                .and_then(|f| f.get("url").and_then(|v| v.as_str()))
-        });
+    let download_url = data.get("url").and_then(|v| v.as_str()).or_else(|| {
+        data.get("formats")
+            .and_then(|v| v.as_array())
+            .and_then(|f| f.first())
+            .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+    });
 
     if let Some(dl_url) = download_url {
         result.media.push(MediaItem {
@@ -917,8 +1280,14 @@ pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
             quality: Some("320kbps".to_string()),
             file_type: Some(MediaType::Audio),
             extension: Some("mp3".to_string()),
-            thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+            thumbnail: data
+                .get("thumbnail")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            file_size: data
+                .get("filesize")
+                .and_then(|v| v.as_u64())
+                .map(format_filesize),
             size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
             frame_width: None,
             frame_height: None,
@@ -964,82 +1333,99 @@ pub async fn fetch_twitter(url: &str) -> Result<DownloadResult, ScrapingError> {
         .await
         .map_err(|e| ScrapingError::Http(format!("Twitter JSON parse failed: {}", e)))?;
 
-    let html = resp
-        .get("data")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            let msg = resp
-                .get("msg")
-                .and_then(|v| v.as_str())
-                .unwrap_or("No data in Twitter response");
-            ScrapingError::Http(msg.to_string())
-        })?;
+    let html = resp.get("data").and_then(|v| v.as_str()).ok_or_else(|| {
+        let msg = resp
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No data in Twitter response");
+        ScrapingError::Http(msg.to_string())
+    })?;
 
-    let document = scraper::Html::parse_document(html);
-    let mut result = DownloadResult::success(None);
-    result.provider = Some("savetwitter".to_string());
+    // Parse savetwitter HTML inside a block so all scraper types
+    // (Html/Selector/ElementRef are NOT Send) go out of scope before the
+    // Playwright fallback .await below keeps the future Send.
+    let mut parsed_media: Vec<(String, Option<String>, Option<MediaType>, Option<String>)> =
+        Vec::new();
+    {
+        let document = scraper::Html::parse_document(html);
+        let tw_video_sel = scraper::Selector::parse("div.tw-video").unwrap();
 
-    let tw_video_sel = scraper::Selector::parse("div.tw-video").unwrap();
-    let _video_list_sel = scraper::Selector::parse("div.video-data > div > ul > li").unwrap();
-
-    if document.select(&tw_video_sel).next().is_some() {
-        if let Ok(item_sel) = scraper::Selector::parse("div.tw-right > div > p:nth-child(1) > a") {
-            for item in document.select(&item_sel) {
-                let quality_text = item.text().collect::<String>();
-                let quality = if quality_text.contains("(") {
-                    quality_text
-                        .split("(")
-                        .nth(1)
-                        .and_then(|s| s.split("p").next())
-                        .unwrap_or(&quality_text)
-                        .trim()
-                        .to_string()
-                } else {
-                    quality_text.trim().to_string()
-                };
-                let href = item.value().attr("href").unwrap_or("").to_string();
-                result.media.push(MediaItem {
-                    url: href,
-                    quality: Some(quality),
-                    file_type: Some(MediaType::Video),
-                    extension: Some("mp4".to_string()),
-                    thumbnail: None,
-                    file_size: None,
-                    size_bytes: None,
-                    frame_width: None,
-                    frame_height: None,
-                    note: None,
-                });
+        if document.select(&tw_video_sel).next().is_some() {
+            if let Ok(item_sel) =
+                scraper::Selector::parse("div.tw-right > div > p:nth-child(1) > a")
+            {
+                for item in document.select(&item_sel) {
+                    let quality_text = item.text().collect::<String>();
+                    let quality = if quality_text.contains("(") {
+                        quality_text
+                            .split("(")
+                            .nth(1)
+                            .and_then(|s| s.split("p").next())
+                            .unwrap_or(&quality_text)
+                            .trim()
+                            .to_string()
+                    } else {
+                        quality_text.trim().to_string()
+                    };
+                    let href = item.value().attr("href").unwrap_or("").to_string();
+                    parsed_media.push((
+                        href,
+                        Some(quality),
+                        Some(MediaType::Video),
+                        Some("mp4".to_string()),
+                    ));
+                }
             }
-        }
-    } else {
-        if let Ok(item_sel) = scraper::Selector::parse("div.video-data > div > ul > li") {
-            for item in document.select(&item_sel) {
-                let href = item
-                    .select(&scraper::Selector::parse("div > div:nth-child(2) > a").unwrap())
-                    .next()
-                    .and_then(|a| a.value().attr("href"))
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if !href.is_empty() {
-                    result.media.push(MediaItem {
-                        url: href,
-                        quality: None,
-                        file_type: Some(MediaType::Image),
-                        extension: Some("jpg".to_string()),
-                        thumbnail: None,
-                        file_size: None,
-                        size_bytes: None,
-                        frame_width: None,
-                        frame_height: None,
-                        note: None,
-                    });
+        } else {
+            if let Ok(item_sel) = scraper::Selector::parse("div.video-data > div > ul > li") {
+                for item in document.select(&item_sel) {
+                    let href = item
+                        .select(&scraper::Selector::parse("div > div:nth-child(2) > a").unwrap())
+                        .next()
+                        .and_then(|a| a.value().attr("href"))
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if !href.is_empty() {
+                        parsed_media.push((
+                            href,
+                            None,
+                            Some(MediaType::Image),
+                            Some("jpg".to_string()),
+                        ));
+                    }
                 }
             }
         }
+    } // document + selectors dropped here
+
+    let mut result = DownloadResult::success(None);
+    result.provider = Some("savetwitter".to_string());
+    for (href, quality, file_type, extension) in parsed_media {
+        result.media.push(MediaItem {
+            url: href,
+            quality,
+            file_type,
+            extension,
+            thumbnail: None,
+            file_size: None,
+            size_bytes: None,
+            frame_width: None,
+            frame_height: None,
+            note: None,
+        });
     }
 
     if result.media.is_empty() {
+        // Fallback: Playwright browser scraping for Twitter video URLs
+        match run_playwright_scraper(url, "twitter").await {
+            Ok(data) => {
+                let pw_result = playwright_to_download_result(&data);
+                if !pw_result.media.is_empty() {
+                    return Ok(pw_result);
+                }
+            }
+            Err(_e) => {}
+        }
         return Ok(DownloadResult::error("Tidak dapat menemukan video"));
     }
 
@@ -1155,10 +1541,22 @@ pub async fn fetch_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> 
     // yt-dlp supports both AV (/video/av123) and BV (/video/BV1xxx) IDs
     let data = run_ytdlp_json(url, &["-f", "bv*+ba/b"]).await?;
 
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
 
     let mut result = DownloadResult::success(title);
     result.author = author;
@@ -1173,16 +1571,38 @@ pub async fn fetch_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> 
             if url.is_some() {
                 result.media.push(MediaItem {
                     url: url.unwrap().to_string(),
-                    quality: fmt.get("format_note").and_then(|v| v.as_str()).map(|s| s.to_string())
-                        .or_else(|| fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string())),
-                    file_type: fmt.get("vcodec").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "none")
+                    quality: fmt
+                        .get("format_note")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            fmt.get("height")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        }),
+                    file_type: fmt
+                        .get("vcodec")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty() && *s != "none")
                         .map(|_| MediaType::Video),
-                    extension: fmt.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    extension: fmt
+                        .get("ext")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     thumbnail: None,
-                    file_size: fmt.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                    file_size: fmt
+                        .get("filesize")
+                        .and_then(|v| v.as_u64())
+                        .map(format_filesize),
                     size_bytes: fmt.get("filesize").and_then(|v| v.as_u64()),
-                    frame_width: fmt.get("width").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    frame_height: fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    frame_width: fmt
+                        .get("width")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    frame_height: fmt
+                        .get("height")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     note: None,
                 });
             }
@@ -1200,10 +1620,22 @@ pub async fn fetch_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError
     // yt-dlp --extract-audio requires a download; use --dump-json for direct URL
     let data = run_ytdlp_json(url, &[]).await?;
 
-    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
 
     let mut result = DownloadResult::success(title);
     result.author = author;
@@ -1211,22 +1643,30 @@ pub async fn fetch_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError
     result.duration = duration;
     result.provider = Some("yt-dlp".to_string());
 
-    let download_url = data.get("url").and_then(|v| v.as_str())
-        .or_else(|| {
-            data.get("formats")
-                .and_then(|v| v.as_array())
-                .and_then(|f| f.first())
-                .and_then(|f| f.get("url").and_then(|v| v.as_str()))
-        });
+    let download_url = data.get("url").and_then(|v| v.as_str()).or_else(|| {
+        data.get("formats")
+            .and_then(|v| v.as_array())
+            .and_then(|f| f.first())
+            .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+    });
 
     if let Some(dl_url) = download_url {
         result.media.push(MediaItem {
             url: dl_url.to_string(),
-            quality: Some(format!("{}kbps", data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128))),
+            quality: Some(format!(
+                "{}kbps",
+                data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128)
+            )),
             file_type: Some(MediaType::Audio),
             extension: Some("mp3".to_string()),
-            thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+            thumbnail: data
+                .get("thumbnail")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            file_size: data
+                .get("filesize")
+                .and_then(|v| v.as_u64())
+                .map(format_filesize),
             size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
             frame_width: None,
             frame_height: None,
