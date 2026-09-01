@@ -391,6 +391,19 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/uploader/file/{name}",
             axum::routing::get(crate::presentation::handler::uploader::serve_file_handler),
         )
+        // AI routes
+        .route(
+            "/ai/chat",
+            axum::routing::get(crate::presentation::handler::ai::chat_handler),
+        )
+        .route(
+            "/ai/gemini",
+            axum::routing::get(crate::presentation::handler::ai::gemini_handler),
+        )
+        .route(
+            "/ai/image",
+            axum::routing::get(crate::presentation::handler::ai::image_handler),
+        )
         // Health
         .route(
             "/health",

@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod anime;
 pub mod anime2;
 pub mod downloader;

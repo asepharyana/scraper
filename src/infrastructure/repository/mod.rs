@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod alqanime;
 pub mod downloader;
 pub mod image;
