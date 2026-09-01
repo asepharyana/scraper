@@ -416,3 +416,359 @@ fn video_from_grid_video(gv: &Value) -> Value {
     }
     v
 }
+
+// ---------------------------------------------------------------------------
+// Mobile Legends — gempaytopup.com stalk (CSRF token + POST)
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_ml_stalk(user_id: &str, zone_id: &str) -> Result<Value, String> {
+    // 1. GET to obtain CSRF token + cookies
+    let resp = http_client()
+        .client()
+        .get("https://www.gempaytopup.com")
+        .header(
+            USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let cookies = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| {
+            v.to_str()
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let body = resp.text().await.map_err(|e| format!("Body: {}", e))?;
+
+    let csrf_re = Regex::new(r#"<meta name="csrf-token" content="(.*?)">"#).unwrap();
+    let csrf = csrf_re
+        .captures(&body)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
+
+    let (csrf, cookies) = match (csrf, cookies.is_empty()) {
+        (Some(c), false) => (c, cookies),
+        _ => return Ok(json!({"error": "Gagal mendapatkan CSRF token atau cookie."})),
+    };
+
+    // 2. POST stalk-ml
+    let payload = json!({"uid": user_id, "zone": zone_id});
+    let resp = http_client()
+        .client()
+        .post("https://www.gempaytopup.com/stalk-ml")
+        .header("X-CSRF-Token", &csrf)
+        .header("Content-Type", "application/json")
+        .header("Cookie", &cookies)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let data: Value = resp.json().await.map_err(|e| format!("JSON: {}", e))?;
+    Ok(data)
+}
+
+// ---------------------------------------------------------------------------
+// Free Fire — freefirecommunity API
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_ff_stalk(user_id: &str) -> Result<Value, String> {
+    let url = format!(
+        "https://discordbot.freefirecommunity.com/player_info_api?uid={}&region=id",
+        user_id
+    );
+    let resp = http_client()
+        .client()
+        .get(&url)
+        .header("Origin", "https://www.freefirecommunity.com")
+        .header(
+            "Referer",
+            "https://www.freefirecommunity.com/ff-account-info/",
+        )
+        .header(USER_AGENT, "Mozilla/5.0 (Linux; Android 10; K)")
+        .header("Accept", "/")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let data: Value = resp.json().await.map_err(|e| format!("JSON: {}", e))?;
+
+    let safe = |v: &Value| -> Value {
+        if v.is_null() {
+            Value::String("N/A".into())
+        } else {
+            v.clone()
+        }
+    };
+    let arr_join = |v: &Value| -> Value {
+        v.as_array()
+            .map(|a| {
+                Value::String(
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            })
+            .unwrap_or(Value::String("-".into()))
+    };
+    let fmt_time = |v: &Value| -> Value {
+        // unix timestamp -> YYYY-MM-DD (approx via chrono)
+        v.as_i64()
+            .map(|ts| {
+                use chrono::{TimeZone, Utc};
+                match Utc.timestamp_opt(ts, 0) {
+                    chrono::LocalResult::Single(dt) => {
+                        Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    }
+                    _ => Value::String("N/A".into()),
+                }
+            })
+            .unwrap_or(Value::String("N/A".into()))
+    };
+
+    let d = &data["player_info"];
+    let b = &d["basicInfo"];
+    let c = &d["creditScoreInfo"];
+    let p = &d["petInfo"];
+    let prof = &d["profileInfo"];
+    let s = &d["socialInfo"];
+
+    // battle tags
+    let tags = s["battleTag"].as_array().cloned().unwrap_or_default();
+    let tag_counts = s["battleTagCount"].as_array().cloned().unwrap_or_default();
+    let battle_tags = if tags.is_empty() {
+        Value::String("N/A".into())
+    } else {
+        Value::String(
+            tags.iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let count = tag_counts.get(i).and_then(|v| v.as_i64()).unwrap_or(0);
+                    format!("{} ({}x)", t.as_str().unwrap_or(""), count)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+
+    Ok(json!({
+        "nickname": safe(&b["nickname"]),
+        "accountId": safe(&b["accountId"]),
+        "region": safe(&b["region"]),
+        "level": safe(&b["level"]),
+        "liked": safe(&b["liked"]),
+        "rank": safe(&b["rank"]),
+        "maxRank": safe(&b["maxRank"]),
+        "csRank": safe(&b["csRank"]),
+        "exp": safe(&b["exp"]),
+        "createAt": fmt_time(&b["createAt"]),
+        "lastLoginAt": fmt_time(&b["lastLoginAt"]),
+        "rankingPoints": safe(&b["rankingPoints"]),
+        "releaseVersion": safe(&b["releaseVersion"]),
+        "seasonId": safe(&b["seasonId"]),
+        "primeLevel": b["primeLevel"]["level"].is_null().then(|| Value::String("-".into())).unwrap_or_else(|| safe(&b["primeLevel"]["level"])),
+        "diamondCost": safe(&d["diamondCostRes"]["diamondCost"]),
+        "petName": safe(&p["name"]),
+        "petLevel": safe(&p["level"]),
+        "petExp": safe(&p["exp"]),
+        "petSkinId": safe(&p["skinId"]),
+        "petSkillId": safe(&p["selectedSkillId"]),
+        "avatarId": safe(&prof["avatarId"]),
+        "clothes": arr_join(&prof["clothes"]),
+        "equipedSkills": arr_join(&prof["equipedSkills"]),
+        "battleTags": battle_tags,
+        "language": safe(&s["language"]),
+        "rankShow": safe(&s["rankShow"]),
+        "signature": safe(&s["signature"]),
+        "creditScore": safe(&c["creditScore"]),
+        "rewardState": safe(&c["rewardState"]),
+        "bannerImage": format!("https://discordbot.freefirecommunity.com/banner_image_api?uid={}&region=id", user_id),
+        "outfitImage": format!("https://discordbot.freefirecommunity.com/outfit_image_api?uid={}&region=id", user_id),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Genshin Impact — enka.network public API
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_genshin_stalk(user_id: &str) -> Result<Value, String> {
+    let url = format!("https://enka.network/u/{}/__data.json", user_id);
+    let resp = http_client()
+        .client()
+        .get(&url)
+        .header(
+            USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("User tidak ditemukan".into());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let data: Value = resp.json().await.map_err(|e| format!("JSON: {}", e))?;
+    // Pass through the raw JSON (Enka __data.json is already structured).
+    Ok(data)
+}
+
+// ---------------------------------------------------------------------------
+// Twitter — fxtwitter API
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_twitter_stalk(username: &str) -> Result<Value, String> {
+    let url = format!("https://api.fxtwitter.com/{}", username);
+    let resp = http_client()
+        .client()
+        .get(&url)
+        .header(
+            USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0 Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let data: Value = resp.json().await.map_err(|e| format!("JSON: {}", e))?;
+
+    // Transform to the source's shape
+    let u = &data["user"];
+    Ok(json!({
+        "message": data.get("message").cloned().unwrap_or(Value::Null),
+        "user": {
+            "id": u.get("id").cloned().unwrap_or(Value::Null),
+            "url": u.get("url").cloned().unwrap_or(Value::Null),
+            "screen_name": u.get("screen_name").cloned().unwrap_or(Value::Null),
+            "name": u.get("name").cloned().unwrap_or(Value::Null),
+            "location": u.get("location").cloned().unwrap_or(Value::Null),
+            "description": u.get("description").cloned().unwrap_or(Value::Null),
+            "followers": u.get("followers").cloned().unwrap_or(Value::Null),
+            "following": u.get("following").cloned().unwrap_or(Value::Null),
+            "likes": u.get("likes").cloned().unwrap_or(Value::Null),
+            "banner_url": u.get("banner_url").cloned().unwrap_or(Value::Null),
+            "avatar_url": u.get("avatar_url").cloned().unwrap_or(Value::Null),
+            "joined_at": u.get("joined").cloned().unwrap_or(Value::Null),
+            "website": u.get("website").cloned().unwrap_or(Value::Null),
+        }
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// TikTok — __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON (V1 direct, no browser)
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_tiktok_stalk(username: &str) -> Result<Value, String> {
+    let url = format!("https://www.tiktok.com/@{username}?_t=ZS-8tHANz7ieoS&_r=1");
+    let resp = http_client()
+        .client()
+        .get(&url)
+        .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let html = resp.text().await.map_err(|e| format!("Body: {}", e))?;
+
+    // Extract __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON
+    let marker = r#"__UNIVERSAL_DATA_FOR_REHYDRATION__"#;
+    let start = html.find(marker).ok_or("User tidak ditemukan")?;
+    let json_start = html[start..]
+        .find('>')
+        .map(|i| start + i + 1)
+        .ok_or("User tidak ditemukan")?;
+    let json_end = html[json_start..]
+        .find("</script>")
+        .map(|i| json_start + i)
+        .ok_or("User tidak ditemukan")?;
+    let json_str = &html[json_start..json_end];
+
+    let parsed: Value = serde_json::from_str(json_str).map_err(|e| format!("JSON: {}", e))?;
+    let user_info = parsed
+        .pointer("/__DEFAULT_SCOPE__/webapp.user-detail/userInfo/user")
+        .cloned()
+        .ok_or("User tidak ditemukan")?;
+    let stats = parsed
+        .pointer("/__DEFAULT_SCOPE__/webapp.user-detail/userInfo/stats")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    Ok(json!({
+        "userInfo": {
+            "id": user_info.get("id").cloned().unwrap_or(Value::Null),
+            "username": user_info.get("uniqueId").cloned().unwrap_or(Value::Null),
+            "name": user_info.get("nickname").cloned().unwrap_or(Value::Null),
+            "avatar": user_info.get("avatarLarger").cloned().unwrap_or(Value::Null),
+            "bio": user_info.get("signature").cloned().unwrap_or(Value::Null),
+            "verified": user_info.get("verified").cloned().unwrap_or(Value::Bool(false)),
+            "totalFollowers": stats.get("followerCount").cloned().unwrap_or(Value::from(0)),
+            "totalFollowing": stats.get("followingCount").cloned().unwrap_or(Value::from(0)),
+            "totalLikes": stats.get("heart").cloned().unwrap_or(Value::from(0)),
+            "totalVideos": stats.get("videoCount").cloned().unwrap_or(Value::from(0)),
+            "totalFriends": stats.get("friendCount").cloned().unwrap_or(Value::from(0)),
+        }
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Instagram — media.mollygram.com HTML scrape
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_instagram_stalk(username: &str) -> Result<Value, String> {
+    let url = format!("https://media.mollygram.com/?url={}", urlencode(username));
+    let resp = http_client()
+        .client()
+        .get(&url)
+        .header("accept", "*/*")
+        .header("origin", "https://mollygram.com")
+        .header("referer", "https://mollygram.com/")
+        .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let body = resp.text().await.map_err(|e| format!("Body: {}", e))?;
+
+    let re = |pat: &str| -> Option<String> {
+        let rx = Regex::new(pat).ok()?;
+        rx.captures(&body)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+    };
+
+    let avatar = re(r#"<img[^>]*class="[^"]*rounded-circle[^"]*"[^>]*src="([^"]+)""#)
+        .or_else(|| re(r#"<img[^>]*src="([^"]+)"[^>]*class="[^"]*rounded-circle[^"]*""#));
+    let uname = re(r#"<h4 class="mb-0">([^<]+)</h4>"#);
+    let fullname = re(r#"<p class="text-muted">([^<]+)</p>"#);
+    let bio = re(r#"<p class="text-dark"[^>]*>([^<]*)</p>"#);
+    let posts = re(r#"<span class="d-block h5 mb-0">([^<]+)</span>\s*<div[^>]*>\s*posts\s*</div>"#);
+    let followers =
+        re(r#"<span class="d-block h5 mb-0">([^<]+)</span>\s*<div[^>]*>\s*followers\s*</div>"#);
+    let following =
+        re(r#"<span class="d-block h5 mb-0">([^<]+)</span>\s*<div[^>]*>\s*following\s*</div>"#);
+
+    Ok(json!({
+        "avatar": avatar,
+        "name": fullname.unwrap_or_default(),
+        "username": uname.unwrap_or_else(|| username.to_string()),
+        "posts": posts.unwrap_or_default(),
+        "followers": followers.unwrap_or_default(),
+        "following": following.unwrap_or_default(),
+        "bio": bio.unwrap_or_default(),
+    }))
+}
+
+fn urlencode(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('&', "%26")
+        .replace('?', "%3F")
+}
