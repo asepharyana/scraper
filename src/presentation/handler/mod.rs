@@ -9,4 +9,5 @@ pub mod proxy;
 pub mod search;
 pub mod stalk;
 pub mod tools;
+pub mod uploader;
 pub mod weebs;

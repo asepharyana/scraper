@@ -382,6 +382,15 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/image/brat/animated",
             axum::routing::get(crate::presentation::handler::image::brat_animated_handler),
         )
+        // Uploader routes
+        .route(
+            "/uploader/ryzencdn",
+            axum::routing::post(crate::presentation::handler::uploader::ryzencdn_handler),
+        )
+        .route(
+            "/uploader/file/{name}",
+            axum::routing::get(crate::presentation::handler::uploader::serve_file_handler),
+        )
         // Health
         .route(
             "/health",
