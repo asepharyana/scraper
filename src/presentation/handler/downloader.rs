@@ -211,6 +211,14 @@ pub async fn download_reddit(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
+/// Handler for _streamable.
+pub async fn download_streamable(
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<DownloadResponse>, AppError> {
+    let result = use_cases::download_streamable(&params.url).await?;
+    Ok(Json(DownloadResponse::ok(result)))
+}
+
 /// Handler for _bilibili.
 pub async fn download_bilibili(
     Query(params): Query<DownloadParams>,

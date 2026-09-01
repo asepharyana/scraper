@@ -115,6 +115,10 @@ pub async fn download_reddit(url: &str) -> Result<DownloadResult, ScrapingError>
     DownloaderRepository::download_reddit(url).await
 }
 
+pub async fn download_streamable(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_streamable(url).await
+}
+
 pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
     DownloaderRepository::download_bilibili(url).await
 }
@@ -131,10 +135,12 @@ pub fn detect_platform(url: &str) -> String {
         "youtube".to_string()
     } else if url.contains("open.spotify.com") || url.contains("spotify.link") {
         "spotify".to_string()
-    } else if url.contains("twitter.com") || url.contains("x.com") || url.contains("t.co") {
+    } else if url.contains("twitter.com") || url.contains("x.com") || url.contains("t.co/") {
         "twitter".to_string()
     } else if url.contains("pinterest") {
         "pinterest".to_string()
+    } else if url.contains("reddit.com") || url.contains("redd.it") {
+        "reddit".to_string()
     } else if url.contains("mega.nz") || url.contains("mega.io") {
         "mega".to_string()
     } else if url.contains("terabox") || url.contains("nfile") {
@@ -157,8 +163,8 @@ pub fn detect_platform(url: &str) -> String {
         "soundcloud".to_string()
     } else if url.contains("dailymotion.com") {
         "dailymotion".to_string()
-    } else if url.contains("reddit.com") || url.contains("redd.it") {
-        "reddit".to_string()
+    } else if url.contains("streamable.com") {
+        "streamable".to_string()
     } else if url.contains("bilibili.com") || url.contains("b23.tv") {
         "bilibili".to_string()
     } else {
