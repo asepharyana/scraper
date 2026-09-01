@@ -237,6 +237,14 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::downloader::download_soundcloud),
         )
         .route(
+            "/download/dailymotion",
+            axum::routing::get(crate::presentation::handler::downloader::download_dailymotion),
+        )
+        .route(
+            "/download/reddit",
+            axum::routing::get(crate::presentation::handler::downloader::download_reddit),
+        )
+        .route(
             "/download/bilibili",
             axum::routing::get(crate::presentation::handler::downloader::download_bilibili),
         )

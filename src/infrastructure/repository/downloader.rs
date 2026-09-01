@@ -468,6 +468,8 @@ impl DownloaderRepository {
             "krakenfiles" => Self::download_krakenfiles(url).await,
             "danbooru" => Self::download_danbooru(url).await,
             "soundcloud" => Self::download_soundcloud(url).await,
+            "dailymotion" => Self::download_dailymotion(url).await,
+            "reddit" => Self::download_reddit(url).await,
             "bilibili" => Self::download_bilibili(url).await,
             _ => fetch_all_in_one(url).await,
         }
@@ -588,6 +590,16 @@ impl DownloaderRepository {
     /// SoundCloud track via ydlp converter.
     pub async fn download_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError> {
         fetch_soundcloud(url).await
+    }
+
+    /// Dailymotion video via yt-dlp.
+    pub async fn download_dailymotion(url: &str) -> Result<DownloadResult, ScrapingError> {
+        fetch_dailymotion(url).await
+    }
+
+    /// Reddit video via yt-dlp.
+    pub async fn download_reddit(url: &str) -> Result<DownloadResult, ScrapingError> {
+        fetch_reddit(url).await
     }
 
     /// Bilibili video via b23.tv short link expansion.
@@ -2155,6 +2167,240 @@ pub async fn fetch_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError
 
     Ok(result)
 }
+// ============================================================================
+// Dailymotion downloader (via yt-dlp)
+// ============================================================================
+
+pub async fn fetch_dailymotion(url: &str) -> Result<DownloadResult, ScrapingError> {
+    if !url.contains("dailymotion.com") {
+        return Err(ScrapingError::Http("Invalid Dailymotion URL".to_string()));
+    }
+
+    let data = run_ytdlp_json(url, &["-f", "bestvideo+bestaudio/best"]).await?;
+
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
+
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
+
+    let formats = data.get("formats").and_then(|v| v.as_array());
+    let mut seen = std::collections::HashSet::new();
+
+    if let Some(fmts) = formats {
+        for f in fmts {
+            if let (Some(furl), Some(ext_val)) = (
+                f.get("url").and_then(|v| v.as_str()),
+                f.get("ext").and_then(|v| v.as_str()),
+            ) {
+                if ext_val == "mhtml" {
+                    continue;
+                }
+                let url_string = furl.to_string();
+                if seen.insert(url_string.clone()) {
+                    let fmt_type = if ext_val == "mp4" || ext_val == "webm" || ext_val == "mkv" {
+                        MediaType::Video
+                    } else if ext_val == "mp3" || ext_val == "m4a" {
+                        MediaType::Audio
+                    } else {
+                        MediaType::File
+                    };
+                    let q = format!("{}p", f.get("height").and_then(|v| v.as_u64()).unwrap_or(0));
+                    result.media.push(MediaItem {
+                        url: url_string,
+                        quality: Some(q),
+                        file_type: Some(fmt_type),
+                        extension: Some(ext_val.to_string()),
+                        thumbnail: data
+                            .get("thumbnail")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        file_size: f
+                            .get("filesize")
+                            .and_then(|v| v.as_u64())
+                            .map(format_filesize),
+                        size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
+                        frame_width: f
+                            .get("width")
+                            .and_then(|v| v.as_u64())
+                            .map(|w| w.to_string()),
+                        frame_height: f
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .map(|h| h.to_string()),
+                        note: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // If no formats listed, fall back to the top-level url
+    if result.media.is_empty() {
+        if let Some(dl_url) = data.get("url").and_then(|v| v.as_str()) {
+            result.media.push(MediaItem {
+                url: dl_url.to_string(),
+                quality: Some(format!(
+                    "{}p",
+                    data.get("height").and_then(|v| v.as_u64()).unwrap_or(0)
+                )),
+                file_type: Some(MediaType::Video),
+                extension: Some(
+                    data.get("ext")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("mp4")
+                        .to_string(),
+                ),
+                thumbnail: data
+                    .get("thumbnail")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                file_size: None,
+                size_bytes: None,
+                frame_width: None,
+                frame_height: None,
+                note: None,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+// ============================================================================
+// Reddit downloader (via yt-dlp)
+// ============================================================================
+
+pub async fn fetch_reddit(url: &str) -> Result<DownloadResult, ScrapingError> {
+    if !url.contains("reddit.com") && !url.contains("redd.it") {
+        return Err(ScrapingError::Http("Invalid Reddit URL".to_string()));
+    }
+
+    let data = run_ytdlp_json(url, &["-f", "bestvideo+bestaudio/best"]).await?;
+
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author = data
+        .get("uploader")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
+
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
+
+    let formats = data.get("formats").and_then(|v| v.as_array());
+    let mut seen = std::collections::HashSet::new();
+
+    if let Some(fmts) = formats {
+        for f in fmts {
+            if let (Some(furl), Some(ext_val)) = (
+                f.get("url").and_then(|v| v.as_str()),
+                f.get("ext").and_then(|v| v.as_str()),
+            ) {
+                if ext_val == "mhtml" {
+                    continue;
+                }
+                let url_string = furl.to_string();
+                if seen.insert(url_string.clone()) {
+                    let fmt_type = if ext_val == "mp4" || ext_val == "webm" || ext_val == "mkv" {
+                        MediaType::Video
+                    } else if ext_val == "mp3" || ext_val == "m4a" {
+                        MediaType::Audio
+                    } else {
+                        MediaType::File
+                    };
+                    let q = format!("{}p", f.get("height").and_then(|v| v.as_u64()).unwrap_or(0));
+                    result.media.push(MediaItem {
+                        url: url_string,
+                        quality: Some(q),
+                        file_type: Some(fmt_type),
+                        extension: Some(ext_val.to_string()),
+                        thumbnail: data
+                            .get("thumbnail")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        file_size: f
+                            .get("filesize")
+                            .and_then(|v| v.as_u64())
+                            .map(format_filesize),
+                        size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
+                        frame_width: f
+                            .get("width")
+                            .and_then(|v| v.as_u64())
+                            .map(|w| w.to_string()),
+                        frame_height: f
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .map(|h| h.to_string()),
+                        note: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // If no formats listed, fall back to the top-level url
+    if result.media.is_empty() {
+        if let Some(dl_url) = data.get("url").and_then(|v| v.as_str()) {
+            result.media.push(MediaItem {
+                url: dl_url.to_string(),
+                quality: Some(format!(
+                    "{}p",
+                    data.get("height").and_then(|v| v.as_u64()).unwrap_or(0)
+                )),
+                file_type: Some(MediaType::Video),
+                extension: Some(
+                    data.get("ext")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("mp4")
+                        .to_string(),
+                ),
+                thumbnail: data
+                    .get("thumbnail")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                file_size: None,
+                size_bytes: None,
+                frame_width: None,
+                frame_height: None,
+                note: None,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
 // ============================================================================
 // Pinterest downloader
 // ============================================================================

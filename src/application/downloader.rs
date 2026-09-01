@@ -107,6 +107,14 @@ pub async fn download_soundcloud(url: &str) -> Result<DownloadResult, ScrapingEr
     DownloaderRepository::download_soundcloud(url).await
 }
 
+pub async fn download_dailymotion(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_dailymotion(url).await
+}
+
+pub async fn download_reddit(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_reddit(url).await
+}
+
 pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
     DownloaderRepository::download_bilibili(url).await
 }
@@ -147,6 +155,10 @@ pub fn detect_platform(url: &str) -> String {
         "danbooru".to_string()
     } else if url.contains("soundcloud.com") {
         "soundcloud".to_string()
+    } else if url.contains("dailymotion.com") {
+        "dailymotion".to_string()
+    } else if url.contains("reddit.com") || url.contains("redd.it") {
+        "reddit".to_string()
     } else if url.contains("bilibili.com") || url.contains("b23.tv") {
         "bilibili".to_string()
     } else {

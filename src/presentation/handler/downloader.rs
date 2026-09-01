@@ -195,6 +195,22 @@ pub async fn download_soundcloud(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
+/// Handler for _dailymotion.
+pub async fn download_dailymotion(
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<DownloadResponse>, AppError> {
+    let result = use_cases::download_dailymotion(&params.url).await?;
+    Ok(Json(DownloadResponse::ok(result)))
+}
+
+/// Handler for _reddit.
+pub async fn download_reddit(
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<DownloadResponse>, AppError> {
+    let result = use_cases::download_reddit(&params.url).await?;
+    Ok(Json(DownloadResponse::ok(result)))
+}
+
 /// Handler for _bilibili.
 pub async fn download_bilibili(
     Query(params): Query<DownloadParams>,
