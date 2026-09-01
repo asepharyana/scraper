@@ -5,3 +5,4 @@ pub mod health;
 pub mod komik;
 pub mod misc;
 pub mod proxy;
+pub mod stalk;

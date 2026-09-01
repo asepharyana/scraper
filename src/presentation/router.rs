@@ -273,6 +273,15 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/misc/server-info",
             axum::routing::get(crate::presentation::handler::misc::server_info_handler),
         )
+        // Stalk routes
+        .route(
+            "/stalk/github",
+            axum::routing::get(crate::presentation::handler::stalk::github_handler),
+        )
+        .route(
+            "/stalk/youtube",
+            axum::routing::get(crate::presentation::handler::stalk::youtube_handler),
+        )
         // Health
         .route(
             "/health",
