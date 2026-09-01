@@ -39,6 +39,8 @@
           installPhase = ''
             mkdir -p $out/bin
             cp target/release/scraper $out/bin/scraper
+            cp $src/scrape_media.py $out/bin/scrape_media.py
+            chmod +x $out/bin/scrape_media.py
           '';
         };
       in

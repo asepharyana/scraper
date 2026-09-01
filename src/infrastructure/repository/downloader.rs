@@ -175,8 +175,25 @@ async fn run_playwright_scraper(
     url: &str,
     platform: &str,
 ) -> Result<serde_json::Value, ScrapingError> {
-    let script = env!("CARGO_MANIFEST_DIR");
-    let scraper_script = format!("{}/scrape_media.py", script);
+    // Locate scrape_media.py robustly: alongside the running binary (Nix store),
+    // the Cargo manifest dir (dev), or a few well-known absolute paths.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let manifest_script = format!("{}/scrape_media.py", env!("CARGO_MANIFEST_DIR"));
+    let mut candid = vec![
+        exe_dir.map(|d| d.join("scrape_media.py").to_string_lossy().to_string()),
+        Some(manifest_script),
+        Some("/home/code/scraper/scrape_media.py".to_string()),
+    ];
+    if let Some(rel) = std::env::var_os("SCRAPER_SCRIPT_DIR") {
+        candid.push(Some(format!("{}/scrape_media.py", rel.to_string_lossy())));
+    }
+    let scraper_script = candid
+        .into_iter()
+        .flatten()
+        .find(|p| std::path::Path::new(p).exists())
+        .ok_or_else(|| ScrapingError::Http("scrape_media.py not found".to_string()))?;
 
     // Find a Python interpreter that has playwright installed.
     // The system `python3` may resolve to a different interpreter for the
