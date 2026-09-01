@@ -119,6 +119,18 @@ pub async fn download_streamable(url: &str) -> Result<DownloadResult, ScrapingEr
     DownloaderRepository::download_streamable(url).await
 }
 
+pub async fn download_videy(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_videy(url).await
+}
+
+pub async fn download_tiktok_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_tiktok_v2(url, None).await
+}
+
+pub async fn download_twitter_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::download_twitter_v2(url, None).await
+}
+
 pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
     DownloaderRepository::download_bilibili(url).await
 }
@@ -165,6 +177,8 @@ pub fn detect_platform(url: &str) -> String {
         "dailymotion".to_string()
     } else if url.contains("streamable.com") {
         "streamable".to_string()
+    } else if url.contains("videy.co") {
+        "videy".to_string()
     } else if url.contains("bilibili.com") || url.contains("b23.tv") {
         "bilibili".to_string()
     } else {

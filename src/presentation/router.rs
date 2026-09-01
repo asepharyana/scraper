@@ -249,6 +249,18 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::downloader::download_streamable),
         )
         .route(
+            "/download/videy",
+            axum::routing::get(crate::presentation::handler::downloader::download_videy),
+        )
+        .route(
+            "/download/tiktok/v2",
+            axum::routing::get(crate::presentation::handler::downloader::download_tiktok_v2),
+        )
+        .route(
+            "/download/twitter/v2",
+            axum::routing::get(crate::presentation::handler::downloader::download_twitter_v2),
+        )
+        .route(
             "/download/bilibili",
             axum::routing::get(crate::presentation::handler::downloader::download_bilibili),
         )

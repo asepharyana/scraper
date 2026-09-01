@@ -451,6 +451,7 @@ impl DownloaderRepository {
                 Err(_) => Self::download_facebook(url, cookies).await,
             },
             "tiktok" => Self::download_tiktok(url, cookies).await,
+            "videy" => Self::download_videy(url).await,
             "youtube" => match Self::download_youtube(url, "720").await {
                 ok @ Ok(_) => ok,
                 Err(_) => Self::download_youtube_mp3(url).await,
@@ -606,6 +607,33 @@ impl DownloaderRepository {
     /// Streamable video via yt-dlp.
     pub async fn download_streamable(url: &str) -> Result<DownloadResult, ScrapingError> {
         fetch_streamable(url).await
+    }
+
+    /// Videy video (direct CDN link build; ported from Shirokami-API videy.js).
+    pub async fn download_videy(url: &str) -> Result<DownloadResult, ScrapingError> {
+        fetch_videy(url).await
+    }
+
+    /// TikTok v2 (douyin.wtf hybrid API; falls back to embed scrape when dead).
+    pub async fn download_tiktok_v2(
+        url: &str,
+        cookies: Option<&str>,
+    ) -> Result<DownloadResult, ScrapingError> {
+        match fetch_tiktok_v2(url).await {
+            ok @ Ok(_) => ok,
+            Err(_) => Self::download_tiktok(url, cookies).await,
+        }
+    }
+
+    /// Twitter v2 (twitsave.com scrape; falls back to Syndication API when blocked).
+    pub async fn download_twitter_v2(
+        url: &str,
+        cookies: Option<&str>,
+    ) -> Result<DownloadResult, ScrapingError> {
+        match fetch_twitter_v2(url).await {
+            ok @ Ok(_) => ok,
+            Err(_) => Self::download_twitter(url, cookies).await,
+        }
     }
 
     /// Bilibili video via b23.tv short link expansion.
