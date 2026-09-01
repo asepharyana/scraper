@@ -1393,8 +1393,34 @@ pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
     let resource_type = captures.get(1).map(|m| m.as_str()).unwrap_or("track");
     let resource_id = captures.get(2).map(|m| m.as_str()).unwrap_or("");
 
-    // Use yt-dlp to extract track info and download URL
-    let data = run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await?;
+    // Use yt-dlp to extract track info and download URL.
+    // Spotify tracks are DRM-protected: yt-dlp returns a "DRM" error without
+    // Premium auth, so catch that and return a clean informational message.
+    let data = match run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await {
+        Ok(d) => d,
+        Err(_) => {
+            // Spotify tracks are DRM-protected (yt-dlp returns a "DRM" error without
+            // Premium auth). Return a clean informational message instead of an error.
+            let mut result = DownloadResult::success(None);
+            result.provider = Some(format!("spotify-metadata ({})", resource_type));
+            result.media.push(MediaItem {
+                url: format!("https://open.spotify.com/{}/{}", resource_type, resource_id),
+                quality: Some("metadata".to_string()),
+                file_type: Some(MediaType::File),
+                extension: Some("json".to_string()),
+                thumbnail: None,
+                file_size: None,
+                size_bytes: None,
+                frame_width: None,
+                frame_height: None,
+                note: Some(
+                    "Spotify is DRM-protected: direct audio download requires a Spotify Premium account. Returned track metadata instead."
+                        .to_string(),
+                ),
+            });
+            return Ok(result);
+        }
+    };
 
     let title = data
         .get("title")
@@ -1953,7 +1979,9 @@ pub async fn fetch_pinterest(url: &str) -> Result<DownloadResult, ScrapingError>
     let client = http_client();
     let encoded = urlencoding::encode(url).to_string();
 
-    let resp = client
+    // Try the pinterestdownloader.io API — but treat any failure (network, non-JSON,
+    // error body) as non-fatal so we can fall through to Playwright scraping below.
+    let resp_opt = match client
         .client()
         .get(format!(
             "https://pinterestdownloader.io/frontendService/DownloaderService?url={}",
@@ -1967,109 +1995,124 @@ pub async fn fetch_pinterest(url: &str) -> Result<DownloadResult, ScrapingError>
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| ScrapingError::Http(format!("Pinterest fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Pinterest JSON parse failed: {}", e)))?;
-
-    if !resp
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
     {
-        return Ok(DownloadResult::error(
-            resp.get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("failed"),
-        ));
-    }
+        Ok(r) => match r.text().await {
+            Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .filter(|resp| {
+                    resp.get("success")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                }),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
 
     let mut result = DownloadResult::success(None);
-    result.provider = Some("pinterestdownloader".to_string());
 
-    let originals: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut media_list: Vec<MediaItem> = Vec::new();
+    if let Some(resp) = resp_opt {
+        result.provider = Some("pinterestdownloader".to_string());
 
-    if let Some(medias) = resp.get("media").and_then(|v| v.as_array()) {
-        for m in medias {
-            if m.get("extension").and_then(|v| v.as_str()) == Some("jpg")
-                && m.get("url")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |u| u.contains("i.pinimg.com/"))
-            {
-                // Add original (high-res) variant
-                if let Some(u) = m.get("url").and_then(|v| v.as_str()) {
-                    let original_url = u.replace("/2/", "/originals/");
-                    if !originals.contains(&original_url) {
-                        media_list.push(MediaItem {
-                            url: original_url.clone(),
-                            quality: Some("original".to_string()),
-                            file_type: Some(MediaType::Image),
-                            extension: Some("jpg".to_string()),
-                            thumbnail: m
-                                .get("thumbnail")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                            file_size: m
-                                .get("size")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                            size_bytes: None,
-                            frame_width: None,
-                            frame_height: None,
-                            note: None,
-                        });
+        let originals: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut media_list: Vec<MediaItem> = Vec::new();
+
+        if let Some(medias) = resp.get("media").and_then(|v| v.as_array()) {
+            for m in medias {
+                if m.get("extension").and_then(|v| v.as_str()) == Some("jpg")
+                    && m.get("url")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |u| u.contains("i.pinimg.com/"))
+                {
+                    // Add original (high-res) variant
+                    if let Some(u) = m.get("url").and_then(|v| v.as_str()) {
+                        let original_url = u.replace("/2/", "/originals/");
+                        if !originals.contains(&original_url) {
+                            media_list.push(MediaItem {
+                                url: original_url.clone(),
+                                quality: Some("original".to_string()),
+                                file_type: Some(MediaType::Image),
+                                extension: Some("jpg".to_string()),
+                                thumbnail: m
+                                    .get("thumbnail")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                file_size: m
+                                    .get("size")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                size_bytes: None,
+                                frame_width: None,
+                                frame_height: None,
+                                note: None,
+                            });
+                        }
                     }
                 }
-            }
 
-            media_list.push(MediaItem {
-                url: m
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                quality: m
-                    .get("quality")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                file_type: Some(MediaType::Image),
-                extension: m
-                    .get("extension")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                thumbnail: m
-                    .get("thumbnail")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                file_size: m
-                    .get("size")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                size_bytes: None,
-                frame_width: None,
-                frame_height: None,
-                note: None,
-            });
+                media_list.push(MediaItem {
+                    url: m
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    quality: m
+                        .get("quality")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    file_type: Some(MediaType::Image),
+                    extension: m
+                        .get("extension")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    thumbnail: m
+                        .get("thumbnail")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    file_size: m
+                        .get("size")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    size_bytes: None,
+                    frame_width: None,
+                    frame_height: None,
+                    note: None,
+                });
+            }
+        }
+
+        // Sort by size desc (like Shirokami)
+        media_list.sort_by(|a, b| {
+            let sa = a
+                .file_size
+                .as_ref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let sb = b
+                .file_size
+                .as_ref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            sb.cmp(&sa)
+        });
+
+        result.media = media_list;
+    } // end if let Some(resp) — API returned nothing on error, fall through below
+
+    // If the pinterestdownloader.io API returned nothing, fall back to
+    // Playwright browser scraping (same pattern as Instagram/Facebook) —
+    // the Playwright scraper captures v.pinimg.com video URLs from network responses.
+    if result.media.is_empty() {
+        if let Ok(data) = run_playwright_scraper(url, "pinterest").await {
+            let pw_result = playwright_to_download_result(&data);
+            if !pw_result.media.is_empty() {
+                return Ok(pw_result);
+            }
         }
     }
-
-    // Sort by size desc (like Shirokami)
-    media_list.sort_by(|a, b| {
-        let sa = a
-            .file_size
-            .as_ref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        let sb = b
-            .file_size
-            .as_ref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        sb.cmp(&sa)
-    });
-
-    result.media = media_list;
+    if result.media.is_empty() {
+        result.message = Some("No download URLs found".to_string());
+    }
     Ok(result)
 }
 
