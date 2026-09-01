@@ -54,15 +54,22 @@ fn extract_tiktok_id(url: &str) -> Option<String> {
     if !url.contains("tiktok.com") && !url.contains("douyin.com") {
         return None;
     }
+    // Handle short URLs like vm.tiktok.com/ZM8s5qJ6t — resolve redirect first
+    if url.contains("vm.tiktok.com") || url.contains("vt.tiktok.com") {
+        let re = regex::Regex::new(r"/([A-Za-z0-9_-]+)$").ok()?;
+        let short_code = re.captures(url).and_then(|c| c.get(1))?.as_str().to_string();
+        return Some(short_code);
+    }
     // TikTok URLs contain an 18-20 digit video ID in the path
     let re = regex::Regex::new(r"/video/(\d{15,25})").ok()?;
     let caps = re.captures(url)?;
     Some(caps.get(1)?.as_str().to_string())
 }
 
-
 /// Locate the yt-dlp binary on the system.
+/// Checks: PATH → /home/code/hermes-agent/.venv/bin/yt-dlp → common locations
 fn find_ytdlp() -> Option<String> {
+    // Check known locations first
     let candidates = [
         "/home/code/hermes-agent/.venv/bin/yt-dlp",
         "/usr/local/bin/yt-dlp",
@@ -75,6 +82,7 @@ fn find_ytdlp() -> Option<String> {
             return Some(c.to_string());
         }
     }
+    // Check PATH
     let paths: Vec<_> = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
@@ -88,45 +96,62 @@ fn find_ytdlp() -> Option<String> {
     None
 }
 
-/// Run yt-dlp --dump-json and return parsed JSON. Uses spawn + manual stdout
-/// read to avoid pipe buffer truncation (>64KB on Linux).
+/// Run yt-dlp --dump-json and return the parsed JSON value.
+/// Uses spawn + manual stdout reading to avoid pipe buffer truncation
+/// on large outputs (>64KB on Linux default pipe buffer).
 async fn run_ytdlp_json(url: &str, extra_args: &[&str]) -> Result<serde_json::Value, ScrapingError> {
     let ytdlp = find_ytdlp()
         .ok_or_else(|| ScrapingError::Http("yt-dlp binary not found".to_string()))?;
+
     let extra_args_owned: Vec<String> = extra_args.iter().map(|s| s.to_string()).collect();
-    let url_owned = url.to_string();
-    let ytdlp_owned = ytdlp.clone();
 
-    let (stdout_bytes, stderr_bytes, status_val) = tokio::task::spawn_blocking(move || {
-        let mut cmd_args: Vec<String> = vec![
-            "--dump-json".to_string(),
-            "--no-warnings".to_string(),
-            "--no-check-certificates".to_string(),
-        ];
-        for arg in &extra_args_owned {
-            cmd_args.push(arg.clone());
+    let (stdout_str, stderr_str, exit_code) = tokio::task::spawn_blocking({
+        let url_owned = url.to_string();
+        let ytdlp_owned = ytdlp.clone();
+        move || {
+            let mut cmd_args: Vec<String> = vec![
+                "--dump-json".to_string(),
+                "--no-warnings".to_string(),
+                "--no-check-certificates".to_string(),
+            ];
+            cmd_args.extend(extra_args_owned.iter().cloned());
+            cmd_args.push(url_owned);
+
+            // Use Stdio::piped() + read_to_string to handle large stdout (64KB+).
+            // Command::output() truncates at pipe buffer size.
+            let mut child = std::process::Command::new(&ytdlp_owned)
+                .args(&cmd_args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| ScrapingError::Http(format!("yt-dlp spawn failed: {}", e)))?;
+
+            let stdout_file = child.stdout.take().unwrap();
+            let stderr_file = child.stderr.take().unwrap();
+            let mut stdout_str = String::new();
+            let mut stderr_str = String::new();
+            use std::io::Read;
+            let mut stdout_handle = stdout_file;
+            stdout_handle.read_to_string(&mut stdout_str).unwrap_or_default();
+            let mut stderr_handle = stderr_file;
+            stderr_handle.read_to_string(&mut stderr_str).unwrap_or_default();
+            let status = child.wait().map_err(|e| ScrapingError::Http(format!("yt-dlp wait failed: {}", e)))?;
+
+            Ok((stdout_str, stderr_str, status.code()))
         }
-        cmd_args.push(url_owned);
-
-        std::process::Command::new(&ytdlp_owned)
-            .args(&cmd_args)
-            .output()
-            .map(|o| (o.stdout, o.stderr, o.status))
-            .map_err(|e| ScrapingError::Http(format!("yt-dlp spawn failed: {}", e)))
     })
     .await
     .map_err(|e| ScrapingError::Http(format!("yt-dlp execution failed: {}", e)))??;
 
-    if !status_val.success() {
-        let stderr = String::from_utf8_lossy(&stderr_bytes);
+    if exit_code != Some(0) {
         return Err(ScrapingError::Http(format!(
             "yt-dlp failed: {}",
-            stderr.trim().lines().last().unwrap_or("unknown error")
+            stderr_str.trim().lines().last().unwrap_or("unknown error")
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&stdout_bytes);
-    let json_line = stdout
+    // yt-dlp --dump-json outputs one JSON per line per format
+    let json_line = stdout_str
         .lines()
         .next()
         .ok_or_else(|| ScrapingError::Http("yt-dlp produced no output".to_string()))?;
@@ -553,6 +578,7 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
         return Ok(DownloadResult::error("Invalid URL"));
     }
 
+    // Try tikwm API first; fall back to yt-dlp if blocked
     let resp = http_client()
         .client()
         .get("https://www.tikwm.com/api/")
@@ -561,61 +587,99 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| ScrapingError::Http(format!("TikTok fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
+        .map_err(|e| ScrapingError::Http(format!("TikTok fetch failed: {}", e)))?;
+
+    let resp_json: serde_json::Value = resp
+        .json()
         .await
         .map_err(|e| ScrapingError::Http(format!("TikTok JSON parse failed: {}", e)))?;
 
-    let mut result = DownloadResult::success(
-        resp.get("data")
-            .and_then(|d| d.get("title"))
+    // Check if tikwm returned an error (e.g. Cloudflare blocked)
+    let tikwm_code = resp_json.get("code");
+    let tikwm_msg = resp_json.get("msg").and_then(|v| v.as_str());
+    
+    if tikwm_code == Some(&serde_json::Value::Number(serde_json::Number::from(0)))
+        && tikwm_msg != Some("Url parsing is failed! Please check url.")
+    {
+        let mut result = DownloadResult::success(
+            resp_json.get("data")
+                .and_then(|d| d.get("title"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        );
+        result.author = resp_json
+            .get("data")
+            .and_then(|d| d.get("author"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.author = resp
-        .get("data")
-        .and_then(|d| d.get("author"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.provider = Some("tikwm".to_string());
+            .map(|s| s.to_string());
+        result.provider = Some("tikwm".to_string());
+        result.thumbnail = resp_json
+            .get("data")
+            .and_then(|d| d.get("cover"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-    if let Some(md) = resp.get("data").and_then(|d| d.get("media")) {
-        if let Some(url) = md.get("play").and_then(|v| v.as_str()) {
-            result.media.push(MediaItem {
-                url: url.to_string(),
-                quality: Some("hd".to_string()),
-                file_type: Some(MediaType::Video),
-                extension: Some("mp4".to_string()),
-                thumbnail: resp
-                    .get("data")
-                    .and_then(|d| d.get("cover"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                file_size: None,
-                size_bytes: None,
-                frame_width: None,
-                frame_height: None,
-                note: None,
-            });
+        if let Some(plays) = resp_json.get("data").and_then(|d| d.get("plays").and_then(|v| v.as_array())) {
+            for play in plays {
+                if let Some(play_url) = play.get("url").and_then(|v| v.as_str()) {
+                    result.media.push(MediaItem {
+                        url: play_url.to_string(),
+                        quality: play.get("quality").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        file_type: Some(MediaType::Video),
+                        extension: Some("mp4".to_string()),
+                        thumbnail: None,
+                        file_size: play.get("size").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        size_bytes: play.get("size").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
+                        frame_width: None,
+                        frame_height: None,
+                        note: None,
+                    });
+                }
+            }
         }
-        if let Some(url) = md.get("play_music").and_then(|v| v.as_str()) {
-            result.media.push(MediaItem {
-                url: url.to_string(),
-                quality: Some("audio".to_string()),
-                file_type: Some(MediaType::Audio),
-                extension: Some("mp3".to_string()),
-                thumbnail: None,
-                file_size: None,
-                size_bytes: None,
-                frame_width: None,
-                frame_height: None,
-                note: None,
-            });
+
+        if result.media.is_empty() {
+            result.message = Some("No download URLs found".to_string());
+            return Ok(result);
+        }
+        return Ok(result);
+    }
+
+    // Fallback: use yt-dlp
+    let data = run_ytdlp_json(url, &[]).await?;
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.provider = Some("yt-dlp".to_string());
+
+    if let Some(formats) = data.get("formats").and_then(|v| v.as_array()) {
+        for fmt in formats {
+            if let Some(fmt_url) = fmt.get("url").and_then(|v| v.as_str()) {
+                result.media.push(MediaItem {
+                    url: fmt_url.to_string(),
+                    quality: fmt.get("format_note").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        .or_else(|| fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string())),
+                    file_type: fmt.get("vcodec").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "none")
+                        .map(|_| MediaType::Video),
+                    extension: fmt.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    thumbnail: None,
+                    file_size: fmt.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                    size_bytes: fmt.get("filesize").and_then(|v| v.as_u64()),
+                    frame_width: fmt.get("width").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    frame_height: fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    note: None,
+                });
+            }
         }
     }
 
     Ok(result)
 }
+
 
 /// TikTok v2 — uses douyin.wtf API
 pub async fn fetch_tiktok_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
@@ -1088,170 +1152,90 @@ pub async fn fetch_twitter_v2(url: &str) -> Result<DownloadResult, ScrapingError
 // ============================================================================
 
 pub async fn fetch_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let aid_match = regex::Regex::new(r"/video/(\d+)/")
-        .unwrap()
-        .captures(url)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str());
+    // yt-dlp supports both AV (/video/av123) and BV (/video/BV1xxx) IDs
+    let data = run_ytdlp_json(url, &["-f", "bv*+ba/b"]).await?;
 
-    if aid_match.is_none() {
-        return Ok(DownloadResult::error("Invalid Bilibili URL format"));
-    }
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
 
-    let client = http_client();
-    let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36";
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
 
-    // Get metadata from the page
-    let page_html = client
-        .client()
-        .get(url)
-        .header(USER_AGENT, ua)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Bilibili page fetch failed: {}", e)))?
-        .text()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Bilibili page read failed: {}", e)))?;
-
-    // HTML parsing — wrapped in scope so document & og closure drop before await (Send)
-    let (title, thumbnail, description) = {
-        let document = scraper::Html::parse_document(&page_html);
-        let og = |meta: &str| {
-            document
-                .select(&scraper::Selector::parse(&format!("meta[property=\"{}\"]", meta)).unwrap())
-                .next()
-                .and_then(|m| m.value().attr("content"))
-                .map(|s| s.to_string())
-        };
-        (
-            og("og:title").unwrap_or_default(),
-            og("og:image"),
-            og("og:description"),
-        )
-    };
-
-    // Get download URL via cobalt-api instances (with fallback chain)
-    let cobalt_endpoints = [
-        "https://cobalt.animeindo.us.kg/",
-        "https://cobalt-api.ayo.tf/",
-        "https://cobalt-api.kwiatekmiki.com/",
-    ];
-
-    let headers = {
-        let mut h = HeaderMap::new();
-        h.insert(USER_AGENT, HeaderValue::from_static(ua));
-        h.insert("accept", HeaderValue::from_static("application/json"));
-        h.insert("content-type", HeaderValue::from_static("application/json"));
-        h.insert(
-            "authorization",
-            HeaderValue::from_static("Api-Key 94a1f5ae-5fb4-4d65-95a7-f401702e99b6"),
-        );
-        h
-    };
-
-    for endpoint in &cobalt_endpoints {
-        let resp = client
-            .client()
-            .post(*endpoint)
-            .headers(headers.clone())
-            .json(&serde_json::json!({
-                "url": url,
-                "disableMetadata": false,
-                "filenameStyle": "nerdy",
-            }))
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await;
-
-        if let Ok(resp) = resp {
-            if let Ok(data) = resp.json::<serde_json::Value>().await {
-                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                if matches!(status, "tunnel" | "stream" | "success") {
-                    let download_url = data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let filename = data.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-
-                    let mut result = DownloadResult::success(Some(title.clone()));
-                    result.thumbnail = thumbnail.clone();
-                    result.description = description.clone();
-                    result.provider = Some("cobalt".to_string());
-
-                    result.media.push(MediaItem {
-                        url: download_url.to_string(),
-                        quality: None,
-                        file_type: Some(MediaType::Video),
-                        extension: Some("mp4".to_string()),
-                        thumbnail: None,
-                        file_size: None,
-                        size_bytes: None,
-                        frame_width: None,
-                        frame_height: None,
-                        note: Some(filename.to_string()),
-                    });
-
-                    return Ok(result);
-                }
+    // Extract media from formats array
+    if let Some(formats) = data.get("formats").and_then(|v| v.as_array()) {
+        for fmt in formats {
+            let url = fmt.get("url").and_then(|v| v.as_str());
+            if url.is_some() {
+                result.media.push(MediaItem {
+                    url: url.unwrap().to_string(),
+                    quality: fmt.get("format_note").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        .or_else(|| fmt.get("height").and_then(|v| v.as_u64()).map(|h| format!("{}p", h))),
+                    file_type: fmt.get("vcodec").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "none")
+                        .map(|_| MediaType::Video),
+                    extension: fmt.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    thumbnail: None,
+                    file_size: fmt.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                    size_bytes: fmt.get("filesize").and_then(|v| v.as_u64()),
+                    frame_width: fmt.get("width").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    frame_height: fmt.get("height").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    note: None,
+                });
             }
         }
     }
 
-    Ok(DownloadResult::error("Failed to fetch video from all APIs"))
+    Ok(result)
 }
 
 // ============================================================================
 // SoundCloud downloader
 // ============================================================================
+// ============================================================================
 
 pub async fn fetch_soundcloud(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let api_key = std::env::var("YTDLP_API_KEY").unwrap_or_default();
-    let client = http_client();
+    let data = run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await?;
 
-    let resp = client
-        .client()
-        .get("https://ytdlpyton.nvlgroup.my.id/download/audio")
-        .query(&[("url", url), ("mode", "url"), ("bitrate", "320")])
-        .header("accept", "application/json")
-        .header("X-API-Key", &api_key)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("SoundCloud fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("SoundCloud JSON parse failed: {}", e)))?;
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
 
-    let download_url = resp["download_url"].as_str().ok_or_else(|| {
-        ScrapingError::Http("No download_url from soundcloud converter".to_string())
-    })?;
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
 
-    let mut result = DownloadResult::success(
-        resp.get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.provider = Some("ytdlpyton".to_string());
-    result.media.push(MediaItem {
-        url: download_url.to_string(),
-        quality: Some("320kbps".to_string()),
-        file_type: Some(MediaType::Audio),
-        extension: Some("mp3".to_string()),
-        thumbnail: resp
-            .get("thumbnail")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        file_size: None,
-        size_bytes: resp
-            .get("filesize")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok()),
-        frame_width: None,
-        frame_height: None,
-        note: None,
-    });
+    let download_url = data.get("url").and_then(|v| v.as_str())
+        .or_else(|| {
+            data.get("formats")
+                .and_then(|v| v.as_array())
+                .and_then(|f| f.first())
+                .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+        });
+
+    if let Some(dl_url) = download_url {
+        result.media.push(MediaItem {
+            url: dl_url.to_string(),
+            quality: Some(format!("{}kbps", data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128))),
+            file_type: Some(MediaType::Audio),
+            extension: Some("mp3".to_string()),
+            thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+            size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
+            frame_width: None,
+            frame_height: None,
+            note: None,
+        });
+    }
 
     Ok(result)
 }
-
 // ============================================================================
 // Pinterest downloader
 // ============================================================================
