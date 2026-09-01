@@ -614,28 +614,6 @@ impl DownloaderRepository {
         fetch_videy(url).await
     }
 
-    /// TikTok v2 (douyin.wtf hybrid API; falls back to embed scrape when dead).
-    pub async fn download_tiktok_v2(
-        url: &str,
-        cookies: Option<&str>,
-    ) -> Result<DownloadResult, ScrapingError> {
-        match fetch_tiktok_v2(url).await {
-            ok @ Ok(_) => ok,
-            Err(_) => Self::download_tiktok(url, cookies).await,
-        }
-    }
-
-    /// Twitter v2 (twitsave.com scrape; falls back to Syndication API when blocked).
-    pub async fn download_twitter_v2(
-        url: &str,
-        cookies: Option<&str>,
-    ) -> Result<DownloadResult, ScrapingError> {
-        match fetch_twitter_v2(url).await {
-            ok @ Ok(_) => ok,
-            Err(_) => Self::download_twitter(url, cookies).await,
-        }
-    }
-
     /// Bilibili video via b23.tv short link expansion.
     pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
         fetch_bilibili(url).await
@@ -1286,10 +1264,16 @@ pub async fn fetch_tiktok(url: &str) -> Result<DownloadResult, ScrapingError> {
                     return Ok(result);
                 }
                 Err(_) => {
-                    // All methods failed
-                    return Err(ScrapingError::Http(
-                        "All TikTok download methods failed (tikwm API blocked, yt-dlp blocked, Playwright blocked)".to_string()
-                    ));
+                    // Last resort: douyin.wtf hybrid API (v2). If it also fails,
+                    // report all methods exhausted.
+                    match fetch_tiktok_v2(url).await {
+                        Ok(v2_result) if !v2_result.media.is_empty() => return Ok(v2_result),
+                        _ => {
+                            return Err(ScrapingError::Http(
+                                "All TikTok download methods failed (tikwm, yt-dlp, Playwright, embed, douyin.wtf)".to_string()
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1951,7 +1935,15 @@ pub async fn fetch_twitter(url: &str) -> Result<DownloadResult, ScrapingError> {
             }
             Err(_e) => {}
         }
-        return Ok(DownloadResult::error("Tidak dapat menemukan video"));
+        // Last resort: twitsave.com scrape (v2). If it also fails, report.
+        match fetch_twitter_v2(url).await {
+            Ok(v2_result) if !v2_result.media.is_empty() => return Ok(v2_result),
+            _ => {
+                return Ok(DownloadResult::error(
+                    "Tidak dapat menemukan video (savetwitter, Playwright, twitsave semua gagal)",
+                ));
+            }
+        }
     }
 
     // Sort by resolution desc

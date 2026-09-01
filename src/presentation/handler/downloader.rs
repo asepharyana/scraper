@@ -227,22 +227,6 @@ pub async fn download_videy(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
-/// Handler for _tiktok_v2.
-pub async fn download_tiktok_v2(
-    Query(params): Query<DownloadParams>,
-) -> Result<Json<DownloadResponse>, AppError> {
-    let result = use_cases::download_tiktok_v2(&params.url).await?;
-    Ok(Json(DownloadResponse::ok(result)))
-}
-
-/// Handler for _twitter_v2.
-pub async fn download_twitter_v2(
-    Query(params): Query<DownloadParams>,
-) -> Result<Json<DownloadResponse>, AppError> {
-    let result = use_cases::download_twitter_v2(&params.url).await?;
-    Ok(Json(DownloadResponse::ok(result)))
-}
-
 /// Handler for _bilibili.
 pub async fn download_bilibili(
     Query(params): Query<DownloadParams>,

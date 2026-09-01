@@ -253,16 +253,25 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::downloader::download_videy),
         )
         .route(
-            "/download/tiktok/v2",
-            axum::routing::get(crate::presentation::handler::downloader::download_tiktok_v2),
-        )
-        .route(
-            "/download/twitter/v2",
-            axum::routing::get(crate::presentation::handler::downloader::download_twitter_v2),
-        )
-        .route(
             "/download/bilibili",
             axum::routing::get(crate::presentation::handler::downloader::download_bilibili),
+        )
+        // Misc routes
+        .route(
+            "/misc/currency-converter",
+            axum::routing::get(crate::presentation::handler::misc::currency_converter_handler),
+        )
+        .route(
+            "/misc/harga-emas",
+            axum::routing::get(crate::presentation::handler::misc::harga_emas_handler),
+        )
+        .route(
+            "/misc/kurs-bca",
+            axum::routing::get(crate::presentation::handler::misc::kurs_bca_handler),
+        )
+        .route(
+            "/misc/server-info",
+            axum::routing::get(crate::presentation::handler::misc::server_info_handler),
         )
         // Health
         .route(

@@ -123,14 +123,6 @@ pub async fn download_videy(url: &str) -> Result<DownloadResult, ScrapingError> 
     DownloaderRepository::download_videy(url).await
 }
 
-pub async fn download_tiktok_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
-    DownloaderRepository::download_tiktok_v2(url, None).await
-}
-
-pub async fn download_twitter_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
-    DownloaderRepository::download_twitter_v2(url, None).await
-}
-
 pub async fn download_bilibili(url: &str) -> Result<DownloadResult, ScrapingError> {
     DownloaderRepository::download_bilibili(url).await
 }
