@@ -60,6 +60,81 @@ fn extract_tiktok_id(url: &str) -> Option<String> {
     Some(caps.get(1)?.as_str().to_string())
 }
 
+
+/// Locate the yt-dlp binary on the system.
+fn find_ytdlp() -> Option<String> {
+    let candidates = [
+        "/home/code/hermes-agent/.venv/bin/yt-dlp",
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp",
+        "/snap/bin/yt-dlp",
+        "/home/code/.local/bin/yt-dlp",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    let paths: Vec<_> = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .collect();
+    for path in &paths {
+        let candidate = path.join("yt-dlp");
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Run yt-dlp --dump-json and return parsed JSON. Uses spawn + manual stdout
+/// read to avoid pipe buffer truncation (>64KB on Linux).
+async fn run_ytdlp_json(url: &str, extra_args: &[&str]) -> Result<serde_json::Value, ScrapingError> {
+    let ytdlp = find_ytdlp()
+        .ok_or_else(|| ScrapingError::Http("yt-dlp binary not found".to_string()))?;
+    let extra_args_owned: Vec<String> = extra_args.iter().map(|s| s.to_string()).collect();
+    let url_owned = url.to_string();
+    let ytdlp_owned = ytdlp.clone();
+
+    let (stdout_bytes, stderr_bytes, status_val) = tokio::task::spawn_blocking(move || {
+        let mut cmd_args: Vec<String> = vec![
+            "--dump-json".to_string(),
+            "--no-warnings".to_string(),
+            "--no-check-certificates".to_string(),
+        ];
+        for arg in &extra_args_owned {
+            cmd_args.push(arg.clone());
+        }
+        cmd_args.push(url_owned);
+
+        std::process::Command::new(&ytdlp_owned)
+            .args(&cmd_args)
+            .output()
+            .map(|o| (o.stdout, o.stderr, o.status))
+            .map_err(|e| ScrapingError::Http(format!("yt-dlp spawn failed: {}", e)))
+    })
+    .await
+    .map_err(|e| ScrapingError::Http(format!("yt-dlp execution failed: {}", e)))??;
+
+    if !status_val.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+        return Err(ScrapingError::Http(format!(
+            "yt-dlp failed: {}",
+            stderr.trim().lines().last().unwrap_or("unknown error")
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let json_line = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| ScrapingError::Http("yt-dlp produced no output".to_string()))?;
+
+    serde_json::from_str(json_line)
+        .map_err(|e| ScrapingError::Http(format!("yt-dlp JSON parse failed: {}", e)))
+}
+
 pub struct DownloaderRepository;
 
 impl DownloaderRepository {
@@ -618,100 +693,39 @@ pub async fn fetch_tiktok_v2(url: &str) -> Result<DownloadResult, ScrapingError>
 
 /// YouTube audio via savetube.media — returns metadata + direct download link.
 pub async fn fetch_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let video_id = extract_youtube_id(url)
+    extract_youtube_id(url)
         .ok_or_else(|| ScrapingError::Http("Invalid YouTube URL".to_string()))?;
 
-    let client = http_client();
-    let ua = "Mozilla/5.0";
+    let data = run_ytdlp_json(url, &["-f", "bestaudio/best"]).await?;
 
-    // Get CDN
-    let cdn_resp = client
-        .client()
-        .get("https://media.savetube.me/api/random-cdn")
-        .header(USER_AGENT, ua)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("CDN fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("CDN JSON parse failed: {}", e)))?;
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
 
-    let cdn = cdn_resp["cdn"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("Failed to fetch CDN".to_string()))?;
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
 
-    // Get video info
-    let info_url = format!("https://{}/v2/info", cdn);
-    let info_resp = client
-        .client()
-        .post(&info_url)
-        .header(USER_AGENT, ua)
-        .json(&serde_json::json!({
-            "url": format!("https://www.youtube.com/watch?v={}", video_id),
-        }))
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Info fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Info JSON parse failed: {}", e)))?;
-
-    let decrypted_key = decrypt_savetube(&info_resp["data"].as_str().unwrap_or(""));
-
-    // Get download link
-    let dl_url = format!("https://{}/download", cdn);
-    let dl_resp = client
-        .client()
-        .post(&dl_url)
-        .header(USER_AGENT, ua)
-        .json(&serde_json::json!({
-            "id": video_id,
-            "downloadType": "audio",
-            "quality": "128",
-            "key": decrypted_key,
-        }))
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Download link fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Download JSON parse failed: {}", e)))?;
-
-    let download_url = dl_resp["data"]["downloadUrl"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No download URL returned".to_string()))?;
-
-    let mut result = DownloadResult::success(
-        info_resp["data"]
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.author = info_resp["data"]
-        .get("author")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.thumbnail = info_resp["data"]
-        .get("thumbnail")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.duration = info_resp["data"]
-        .get("duration")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.provider = Some("savetube".to_string());
+    let download_url = data.get("url").and_then(|v| v.as_str())
+        .or_else(|| {
+            data.get("formats")
+                .and_then(|v| v.as_array())
+                .and_then(|f| f.first())
+                .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+        })
+        .ok_or_else(|| ScrapingError::Http("No audio format URL from yt-dlp".to_string()))?;
 
     result.media.push(MediaItem {
         url: download_url.to_string(),
-        quality: Some("128kbps".to_string()),
+        quality: Some(format!("{}kbps", data.get("abr").and_then(|v| v.as_u64()).unwrap_or(128))),
         file_type: Some(MediaType::Audio),
         extension: Some("mp3".to_string()),
-        thumbnail: None,
-        file_size: None,
-        size_bytes: None,
+        thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+        size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
         frame_width: None,
         frame_height: None,
         note: None,
@@ -720,464 +734,150 @@ pub async fn fetch_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingErro
     Ok(result)
 }
 
-/// YouTube video via savetube.media
+/// YouTube video via yt-dlp
 pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResult, ScrapingError> {
-    let video_id = extract_youtube_id(url)
+    extract_youtube_id(url)
         .ok_or_else(|| ScrapingError::Http("Invalid YouTube URL".to_string()))?;
 
-    let client = http_client();
-    let ua = "Mozilla/5.0";
+    let fmt = format!("bestvideo[height<={}]/best+bestaudio/best", quality.trim_end_matches('p'));
+    let data = run_ytdlp_json(url, &["-f", &fmt]).await?;
 
-    // Get CDN
-    let cdn_resp = client
-        .client()
-        .get("https://media.savetube.me/api/random-cdn")
-        .header(USER_AGENT, ua)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("CDN fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("CDN JSON parse failed: {}", e)))?;
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("uploader").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
 
-    let cdn = cdn_resp["cdn"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("Failed to fetch CDN".to_string()))?;
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some("yt-dlp".to_string());
 
-    // Get video info
-    let info_url = format!("https://{}/v2/info", cdn);
-    let info_resp = client
-        .client()
-        .post(&info_url)
-        .header(USER_AGENT, ua)
-        .json(&serde_json::json!({
-            "url": format!("https://www.youtube.com/watch?v={}", video_id),
-        }))
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Info fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Info JSON parse failed: {}", e)))?;
+    let formats = data.get("formats").and_then(|v| v.as_array());
+    let mut seen = std::collections::HashSet::new();
 
-    let decrypted_key = decrypt_savetube(&info_resp["data"].as_str().unwrap_or(""));
-
-    // Get download link
-    let dl_url = format!("https://{}/download", cdn);
-    let clean_quality = quality.trim_end_matches('p');
-    let dl_resp = client
-        .client()
-        .post(&dl_url)
-        .header(USER_AGENT, ua)
-        .json(&serde_json::json!({
-            "id": video_id,
-            "downloadType": "video",
-            "quality": clean_quality,
-            "key": decrypted_key,
-        }))
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Download link fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Download JSON parse failed: {}", e)))?;
-
-    let download_url = dl_resp["data"]["downloadUrl"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No download URL returned".to_string()))?;
-
-    let mut result = DownloadResult::success(
-        info_resp["data"]
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.author = info_resp["data"]
-        .get("author")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.thumbnail = info_resp["data"]
-        .get("thumbnail")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    result.provider = Some("savetube".to_string());
-
-    result.media.push(MediaItem {
-        url: download_url.to_string(),
-        quality: Some(format!("{}p", clean_quality)),
-        file_type: Some(MediaType::Video),
-        extension: Some("mp4".to_string()),
-        thumbnail: None,
-        file_size: None,
-        size_bytes: None,
-        frame_width: None,
-        frame_height: None,
-        note: None,
-    });
-
-    Ok(result)
-}
-
-/// YouTube via ytdlpyton (v2 API) — used as Spotify/TikTok metadata source too
-pub async fn fetch_youtube_v2_mp3(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let api_key = std::env::var("YTDLP_API_KEY").unwrap_or_default();
-    let client = http_client();
-
-    let resp = client
-        .client()
-        .get("https://ytdlpyton.nvlgroup.my.id/download/audio")
-        .query(&[("url", url), ("mode", "url"), ("bitrate", "320")])
-        .header("accept", "application/json")
-        .header("X-API-Key", &api_key)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("ytdlpyton fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("ytdlpyton JSON parse failed: {}", e)))?;
-
-    let download_url = resp["download_url"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No download_url in response".to_string()))?;
-
-    let mut result = DownloadResult::success(
-        resp.get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.provider = Some("ytdlpyton".to_string());
-    result.media.push(MediaItem {
-        url: download_url.to_string(),
-        quality: Some("320kbps".to_string()),
-        file_type: Some(MediaType::Audio),
-        extension: Some("mp3".to_string()),
-        thumbnail: resp
-            .get("thumbnail")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        file_size: resp
-            .get("filesize")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        size_bytes: None,
-        frame_width: None,
-        frame_height: None,
-        note: None,
-    });
-
-    Ok(result)
-}
-
-pub async fn fetch_youtube_v2_mp4(
-    url: &str,
-    quality: &str,
-) -> Result<DownloadResult, ScrapingError> {
-    let api_key = std::env::var("YTDLP_API_KEY").unwrap_or_default();
-    let clean_quality = quality.trim_end_matches("p");
-
-    let client = http_client();
-    let resp = client
-        .client()
-        .get("https://ytdlpyton.nvlgroup.my.id/download/")
-        .query(&[("url", url), ("resolution", clean_quality), ("mode", "url")])
-        .header("accept", "application/json")
-        .header("X-API-Key", &api_key)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("ytdlpyton fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("ytdlpyton JSON parse failed: {}", e)))?;
-
-    let download_url = resp["download_url"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No download_url in response".to_string()))?;
-
-    let mut result = DownloadResult::success(
-        resp.get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    );
-    result.provider = Some("ytdlpyton".to_string());
-    result.media.push(MediaItem {
-        url: download_url.to_string(),
-        quality: Some(format!("{}p", clean_quality)),
-        file_type: Some(MediaType::Video),
-        extension: Some("mp4".to_string()),
-        thumbnail: resp
-            .get("thumbnail")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        file_size: resp
-            .get("filesize")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        size_bytes: None,
-        frame_width: None,
-        frame_height: None,
-        note: None,
-    });
-
-    Ok(result)
-}
-
-/// AES-128-CBC decryption for savetube.info API response, ported from JS.
-/// Key: 0x37303735... (the savetube secret key as hex bytes).
-fn decrypt_savetube(enc_b64: &str) -> String {
-    use base64::engine::general_purpose::STANDARD as BASE64;
-
-    // Hardcoded secret key from savetube source
-    let secret_key = "C5D58EF67A7584E4A29F6C35BBC4EB12";
-    let key_bytes = hex::decode(secret_key).unwrap_or_else(|_| vec![0u8; 16]);
-    if key_bytes.len() < 16 {
-        return String::new();
-    }
-    let key = &key_bytes[..16];
-
-    let decoded = match BASE64.decode(enc_b64) {
-        Ok(d) => d,
-        Err(_) => return String::new(),
-    };
-
-    if decoded.len() < 16 {
-        return String::new();
-    }
-
-    let (_iv, content) = decoded.split_at(16);
-
-    use aes::Aes128;
-
-    let cipher = match Aes128::new_from_slice(key) {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-
-    let mut buf = content.to_vec();
-    // PKCS7 padding: pad to 16-byte blocks
-    let pad_len = 16 - (buf.len() % 16);
-    buf.resize(buf.len() + pad_len, pad_len as u8);
-
-    let mut blocks: Vec<[u8; 16]> = Vec::new();
-    for chunk in buf.chunks_exact(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        blocks.push(block);
-    }
-
-    let cipher_clone = cipher.clone();
-    for block in &mut blocks {
-        cipher_clone.decrypt_block(block.into());
-    }
-
-    let mut result = Vec::new();
-    for block in &blocks {
-        result.extend_from_slice(block);
-    }
-
-    // Strip PKCS7 padding
-    if let Some(&pad) = result.last() {
-        if pad > 0 && pad <= 16 && result.len() >= pad as usize {
-            result.truncate(result.len() - pad as usize);
+    if let Some(fmts) = formats {
+        for f in fmts {
+            if let (Some(furl), Some(ext_val)) = (
+                f.get("url").and_then(|v| v.as_str()),
+                f.get("ext").and_then(|v| v.as_str()),
+            ) {
+                if ext_val == "mhtml" { continue; }
+                let url_string = furl.to_string();
+                if seen.insert(url_string.clone()) {
+                    let fmt_type = if ext_val == "mp4" || ext_val == "webm" || ext_val == "mkv" {
+                        MediaType::Video
+                    } else if ext_val == "mp3" || ext_val == "m4a" || ext_val == "webm" {
+                        MediaType::Audio
+                    } else {
+                        MediaType::File
+                    };
+                    let q = format!("{}p", f.get("height").and_then(|v| v.as_u64()).unwrap_or(0));
+                    result.media.push(MediaItem {
+                        url: url_string,
+                        quality: Some(q),
+                        file_type: Some(fmt_type),
+                        extension: Some(ext_val.to_string()),
+                        thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        file_size: f.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                        size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
+                        frame_width: f.get("width").and_then(|v| v.as_u64()).map(|w| w.to_string()),
+                        frame_height: f.get("height").and_then(|v| v.as_u64()).map(|h| h.to_string()),
+                        note: None,
+                    });
+                }
+            }
         }
     }
 
-    String::from_utf8_lossy(&result).into_owned()
+    if result.media.is_empty() {
+        if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+            result.media.push(MediaItem {
+                url: url.to_string(),
+                quality: Some(format!("{}p", quality.trim_end_matches('p'))),
+                file_type: Some(MediaType::Video),
+                extension: Some(data.get("ext").and_then(|v| v.as_str()).unwrap_or("mp4").to_string()),
+                thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+                size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
+                frame_width: None,
+                frame_height: None,
+                note: None,
+            });
+        }
+    }
+
+    Ok(result)
 }
 
-// ============================================================================
 // Spotify downloaders
 // ============================================================================
 
 pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
-    // Client credentials from env (or hardcoded demo credentials like Shirokami)
-    let client_id = std::env::var("SPOTIFY_CLIENT_ID")
-        .unwrap_or_else(|_| "77f9aeb80cda4c5d84f59a325dcc63be".to_string());
-    let client_secret = std::env::var("SPOTIFY_CLIENT_SECRET")
-        .unwrap_or_else(|_| "70162e558fb547f99dc529c0a492f39b".to_string());
-
-    // Parse track ID from URL
+    // Validate Spotify URL
     let re = regex::Regex::new(
-        r"https?://open\.spotify\.com/(?:intl-[a-zA-Z0-9-]+/)?track/([a-zA-Z0-9]+)",
+        r"https?://open\.spotify\.com/(?:intl-[a-zA-Z0-9-]+/)?(track|album|playlist)/([a-zA-Z0-9]+)",
     )
     .unwrap();
-    let track_id = re
+    let captures = re
         .captures(url)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
         .ok_or_else(|| ScrapingError::Http("Invalid Spotify URL".to_string()))?;
+    let resource_type = captures.get(1).map(|m| m.as_str()).unwrap_or("track");
+    let resource_id = captures.get(2).map(|m| m.as_str()).unwrap_or("");
 
-    let client = http_client();
+    // Use yt-dlp to extract track info and download URL
+    let data = run_ytdlp_json(url, &["--extract-audio", "--audio-format", "mp3"]).await?;
 
-    // Get access token
-    let auth = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", client_id, client_secret));
-    let token_resp = client
-        .client()
-        .post("https://accounts.spotify.com/api/token")
-        .header("Authorization", format!("Basic {}", auth))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body("grant_type=client_credentials")
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify token fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify token JSON parse failed: {}", e)))?;
+    let title = data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let author = data.get("artist").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail = data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let duration = data.get("duration").and_then(|v| v.as_u64()).map(|d| format!("{}s", d));
 
-    let token = token_resp["access_token"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No access token from Spotify".to_string()))?;
+    let mut result = DownloadResult::success(title);
+    result.author = author;
+    result.thumbnail = thumbnail;
+    result.duration = duration;
+    result.provider = Some(format!("spotify-yt-dlp ({})", resource_type));
 
-    // Get track info
-    let track_resp = client
-        .client()
-        .get(format!("https://api.spotify.com/v1/tracks/{}", track_id))
-        .header("Authorization", format!("Bearer {}", token))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify track fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify track JSON parse failed: {}", e)))?;
+    let download_url = data.get("url").and_then(|v| v.as_str())
+        .or_else(|| {
+            data.get("formats")
+                .and_then(|v| v.as_array())
+                .and_then(|f| f.first())
+                .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+        });
 
-    let title = track_resp["name"].as_str().unwrap_or("Unknown").to_string();
-    let album = track_resp["album"]["name"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let cover = track_resp["album"]["images"][0]["url"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let artists: Vec<String> = track_resp["artists"]
-        .as_array()
-        .map_or(Vec::<serde_json::Value>::new(), |v| v.clone())
-        .iter()
-        .filter_map(|a| a["name"].as_str().map(|s| s.to_string()))
-        .collect();
-
-    // Get download URL via ytdlpyton
-    let api_key = std::env::var("YTDLP_API_KEY").unwrap_or_default();
-    let dl_resp = client
-        .client()
-        .get("https://ytdlpyton.nvlgroup.my.id/spotify/download/audio")
-        .query(&[("url", url), ("mode", "url")])
-        .header("accept", "application/json")
-        .header("X-API-Key", &api_key)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify download fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("Spotify download JSON parse failed: {}", e)))?;
-
-    let download_url = dl_resp["download_url"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No download_url from spotify converter".to_string()))?;
-
-    let mut result = DownloadResult::success(Some(title.clone()));
-    result.author = Some(artists.join(", "));
-    result.thumbnail = if cover.is_empty() { None } else { Some(cover) };
-    result.duration = Some(album);
-    result.provider = Some("spotify".to_string());
-
-    result.media.push(MediaItem {
-        url: download_url.to_string(),
-        quality: Some("320kbps".to_string()),
-        file_type: Some(MediaType::Audio),
-        extension: Some("mp3".to_string()),
-        thumbnail: None,
-        file_size: None,
-        size_bytes: None,
-        frame_width: None,
-        frame_height: None,
-        note: None,
-    });
-
-    Ok(result)
-}
-
-/// Spotify v2 — uses spotidown service
-pub async fn fetch_spotify_v2(url: &str) -> Result<DownloadResult, ScrapingError> {
-    let api_key = std::env::var("YTDLP_API_KEY").unwrap_or_default();
-    let client = http_client();
-
-    let resp = client
-        .client()
-        .get("https://ytdlpyton.nvlgroup.my.id/spotify/download/audio")
-        .query(&[("url", url), ("mode", "url")])
-        .header("accept", "application/json")
-        .header("X-API-Key", &api_key)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("spotidown fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("spotidown JSON parse failed: {}", e)))?;
-
-    if resp
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let download_url = resp["link"]
-            .as_str()
-            .ok_or_else(|| ScrapingError::Http("No download link".to_string()))?;
-
-        let metadata = &resp["metadata"];
-        let mut result = DownloadResult::success(
-            metadata
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        );
-        result.author = metadata
-            .get("artists")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        result.thumbnail = metadata
-            .get("cover")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        result.description = metadata
-            .get("album")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        result.provider = Some("spotidown".to_string());
-
+    if let Some(dl_url) = download_url {
         result.media.push(MediaItem {
-            url: download_url.to_string(),
+            url: dl_url.to_string(),
             quality: Some("320kbps".to_string()),
             file_type: Some(MediaType::Audio),
             extension: Some("mp3".to_string()),
-            thumbnail: None,
-            file_size: None,
-            size_bytes: None,
+            thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            file_size: data.get("filesize").and_then(|v| v.as_u64()).map(format_filesize),
+            size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
             frame_width: None,
             frame_height: None,
             note: None,
         });
-
         Ok(result)
     } else {
-        Ok(DownloadResult::error(
-            resp.get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Download failed"),
-        ))
+        result.media.push(MediaItem {
+            url: format!("https://open.spotify.com/track/{}", resource_id),
+            quality: Some("metadata".to_string()),
+            file_type: Some(MediaType::File),
+            extension: Some("json".to_string()),
+            thumbnail: data.get("thumbnail").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            file_size: None,
+            size_bytes: None,
+            frame_width: None,
+            frame_height: None,
+            note: Some("Spotify track metadata extracted via yt-dlp. Direct audio download requires Spotify Premium.".to_string()),
+        });
+        Ok(result)
     }
 }
 
-// ============================================================================
 // Twitter downloaders
 // ============================================================================
 
@@ -1200,9 +900,16 @@ pub async fn fetch_twitter(url: &str) -> Result<DownloadResult, ScrapingError> {
         .await
         .map_err(|e| ScrapingError::Http(format!("Twitter JSON parse failed: {}", e)))?;
 
-    let html = resp["data"]
-        .as_str()
-        .ok_or_else(|| ScrapingError::Http("No data in Twitter response".to_string()))?;
+    let html = resp
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let msg = resp
+                .get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("No data in Twitter response");
+            ScrapingError::Http(msg.to_string())
+        })?;
 
     let document = scraper::Html::parse_document(html);
     let mut result = DownloadResult::success(None);
