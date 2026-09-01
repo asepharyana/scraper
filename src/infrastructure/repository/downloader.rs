@@ -1466,7 +1466,124 @@ pub async fn fetch_spotify(url: &str) -> Result<DownloadResult, ScrapingError> {
 // Twitter downloaders
 // ============================================================================
 
+/// Twitter/X via the Syndication API (primary method, tokenless, works server-side).
+/// Scrapes `https://cdn.syndication.twimg.com/tweet-result?id={tweet_id}&lang=en&token=0`
+/// which returns JSON with the tweet's video `variants[]` (MP4 URLs at multiple bitrates).
+/// Verified: returns real downloadable video.twimg.com MP4s (200/206, video/mp4) — no auth.
+async fn fetch_twitter_syndication(url: &str) -> Result<DownloadResult, ScrapingError> {
+    // Extract tweet ID from twitter.com/x.com URL
+    let tweet_id = regex::Regex::new(r"(?:twitter\.com|x\.com)/[^/]+/status/(\d+)")
+        .unwrap()
+        .captures(url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| ScrapingError::Http("Invalid Twitter URL, no status ID".to_string()))?;
+
+    let api_url = format!(
+        "https://cdn.syndication.twimg.com/tweet-result?id={}&lang=en&token=0",
+        tweet_id
+    );
+
+    let client = http_client();
+    let resp = client
+        .client()
+        .get(&api_url)
+        .header(
+            USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| ScrapingError::Http(format!("Twitter syndication fetch failed: {}", e)))?;
+
+    if resp.status() != reqwest::StatusCode::OK {
+        return Err(ScrapingError::Http(format!(
+            "Twitter syndication returned HTTP {}",
+            resp.status()
+        )));
+    }
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        ScrapingError::Http(format!("Twitter syndication JSON parse failed: {}", e))
+    })?;
+
+    let text = data
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut result = DownloadResult::success(text);
+    result.author = data
+        .get("user")
+        .and_then(|v| v.get("screen_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    result.provider = Some("twitter-syndication".to_string());
+
+    // Recursively find media with video_info.variants (video/mp4)
+    let mut variants: Vec<(u64, String)> = Vec::new();
+    let collect = |node: &serde_json::Value, variants: &mut Vec<(u64, String)>| {
+        fn walk(n: &serde_json::Value, out: &mut Vec<(u64, String)>, depth: usize) {
+            if depth > 6 {
+                return;
+            }
+            if let Some(obj) = n.as_object() {
+                if let Some(video_info) = obj.get("video_info") {
+                    if let Some(vars) = video_info.get("variants").and_then(|v| v.as_array()) {
+                        for v in vars {
+                            if v.get("content_type").and_then(|c| c.as_str()) == Some("video/mp4") {
+                                if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
+                                    let bitrate =
+                                        v.get("bitrate").and_then(|b| b.as_u64()).unwrap_or(0);
+                                    out.push((bitrate, u.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                for (_, v) in obj {
+                    walk(v, out, depth + 1);
+                }
+            } else if let Some(arr) = n.as_array() {
+                for it in arr {
+                    walk(it, out, depth + 1);
+                }
+            }
+        }
+        walk(node, variants, 0);
+    };
+    collect(&data, &mut variants);
+
+    // Sort by bitrate desc (highest quality first)
+    variants.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (bitrate, video_url) in variants {
+        result.media.push(MediaItem {
+            url: video_url,
+            quality: Some(format!("{}k", bitrate / 1000)),
+            file_type: Some(MediaType::Video),
+            extension: Some("mp4".to_string()),
+            thumbnail: None,
+            file_size: None,
+            size_bytes: None,
+            frame_width: None,
+            frame_height: None,
+            note: None,
+        });
+    }
+
+    Ok(result)
+}
+
 pub async fn fetch_twitter(url: &str) -> Result<DownloadResult, ScrapingError> {
+    // Primary: use the tokenless Syndication API (works server-side, no auth)
+    if let Ok(synd_result) = fetch_twitter_syndication(url).await {
+        if !synd_result.media.is_empty() {
+            return Ok(synd_result);
+        }
+    }
+
     let client = http_client();
     let ua = "PostmanRuntime/7.32.2";
 
