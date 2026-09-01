@@ -81,8 +81,13 @@ pub async fn fetch_youtube_stalk(username: &str) -> Result<Value, String> {
         .map_err(|e| format!("Failed to read body: {}", e))?;
 
     // Extract var ytInitialData = {...} via brace matching (JSON may contain ";").
-    let start = body.find("var ytInitialData = ").ok_or_else(|| "ytInitialData not found".to_string())?;
-    let brace = body[start..].find('{').ok_or_else(|| "ytInitialData parse".to_string())? + start;
+    let start = body
+        .find("var ytInitialData = ")
+        .ok_or_else(|| "ytInitialData not found".to_string())?;
+    let brace = body[start..]
+        .find('{')
+        .ok_or_else(|| "ytInitialData parse".to_string())?
+        + start;
     let json_str = extract_balanced_json(&body, brace)?;
     let parsed: Value =
         serde_json::from_str(&json_str).map_err(|e| format!("JSON parse: {}", e))?;
@@ -99,7 +104,10 @@ pub async fn fetch_youtube_stalk(username: &str) -> Result<Value, String> {
         "isFamilySafe": Value::Null,
     });
 
-    if let Some(meta) = parsed.get("metadata").and_then(|m| m.get("channelMetadataRenderer")) {
+    if let Some(meta) = parsed
+        .get("metadata")
+        .and_then(|m| m.get("channelMetadataRenderer"))
+    {
         let mut set = |dst: &str, src: &str| {
             if let Some(v) = meta.get(src) {
                 channel[dst] = v.clone();
@@ -112,7 +120,10 @@ pub async fn fetch_youtube_stalk(username: &str) -> Result<Value, String> {
     }
 
     // Subscriber/video count from header.pageHeaderRenderer
-    if let Some(header) = parsed.get("header").and_then(|h| h.get("pageHeaderRenderer")) {
+    if let Some(header) = parsed
+        .get("header")
+        .and_then(|h| h.get("pageHeaderRenderer"))
+    {
         if let Some(rows) = header
             .pointer("/content/pageHeaderViewModel/metadata/contentMetadataViewModel/metadataRows")
         {
@@ -293,8 +304,10 @@ fn video_from_video_renderer(vd: &Value) -> Value {
         .pointer("/thumbnailOverlays")
         .and_then(|o| o.as_array())
         .and_then(|arr| {
-            arr.iter()
-                .find_map(|ov| ov.pointer("/thumbnailOverlayTimeStatusRenderer/text/simpleText").cloned())
+            arr.iter().find_map(|ov| {
+                ov.pointer("/thumbnailOverlayTimeStatusRenderer/text/simpleText")
+                    .cloned()
+            })
         })
     {
         v["duration"] = dur;
@@ -393,8 +406,10 @@ fn video_from_grid_video(gv: &Value) -> Value {
         .pointer("/thumbnailOverlays")
         .and_then(|o| o.as_array())
         .and_then(|arr| {
-            arr.iter()
-                .find_map(|ov| ov.pointer("/thumbnailOverlayTimeStatusRenderer/text/simpleText").cloned())
+            arr.iter().find_map(|ov| {
+                ov.pointer("/thumbnailOverlayTimeStatusRenderer/text/simpleText")
+                    .cloned()
+            })
         })
     {
         v["duration"] = dur;

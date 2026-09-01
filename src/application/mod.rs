@@ -4,5 +4,6 @@ pub mod downloader;
 pub mod komik;
 pub mod misc;
 pub mod proxy;
+pub mod search;
 pub mod stalk;
 pub mod weebs;

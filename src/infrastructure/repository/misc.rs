@@ -68,11 +68,8 @@ pub async fn fetch_currency_converter(amount: f64, from: &str, to: &str) -> Resu
         .collect::<String>();
 
     // Look for patterns like "15,885.00 IDR" in body text
-    let re2 = Regex::new(&format!(
-        r"([0-9,.]+)\s+{}",
-        to.to_uppercase()
-    ))
-    .map_err(|e| format!("Regex compile: {}", e))?;
+    let re2 = Regex::new(&format!(r"([0-9,.]+)\s+{}", to.to_uppercase()))
+        .map_err(|e| format!("Regex compile: {}", e))?;
 
     if let Some(caps) = re2.captures(&text) {
         let rate_str = caps.get(1).map(|m| m.as_str()).unwrap_or("0");
@@ -228,7 +225,11 @@ pub async fn fetch_kurs_bca() -> Result<Value, String> {
                     .map(|td| td.text().collect::<String>().trim().to_string())
                     .collect();
 
-                if cols.len() >= 3 && !cols[0].is_empty() && !cols[1].is_empty() && !cols[2].is_empty() {
+                if cols.len() >= 3
+                    && !cols[0].is_empty()
+                    && !cols[1].is_empty()
+                    && !cols[2].is_empty()
+                {
                     kurs_data.push(json!({
                         "currency": cols[0],
                         "jual": cols[1],

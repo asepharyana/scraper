@@ -303,6 +303,27 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/weebs/nsfw-waifu",
             axum::routing::get(crate::presentation::handler::weebs::nsfw_waifu_handler),
         )
+        // Search routes
+        .route(
+            "/search/bmkg",
+            axum::routing::get(crate::presentation::handler::search::bmkg_handler),
+        )
+        .route(
+            "/search/jadwal-sholat",
+            axum::routing::get(crate::presentation::handler::search::jadwal_sholat_handler),
+        )
+        .route(
+            "/search/weather",
+            axum::routing::get(crate::presentation::handler::search::weather_handler),
+        )
+        .route(
+            "/search/google",
+            axum::routing::get(crate::presentation::handler::search::google_handler),
+        )
+        .route(
+            "/search/yt",
+            axum::routing::get(crate::presentation::handler::search::yt_handler),
+        )
         // Health
         .route(
             "/health",

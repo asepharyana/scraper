@@ -169,7 +169,11 @@ fn join_names(v: Option<&Value>) -> String {
     v.and_then(|g| g.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|g| g.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .filter_map(|g| {
+                    g.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         })
