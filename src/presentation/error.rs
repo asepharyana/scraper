@@ -135,6 +135,10 @@ impl IntoResponse for AppError {
 
 impl From<ScrapingError> for AppError {
     fn from(e: ScrapingError) -> Self {
-        AppError::Internal(format!("{}", e))
+        // Map ScrapingError::Http to BAD_GATEWAY (502) — the scraper code
+        // correctly returns DownloadResult::error for client-side issues
+        // (invalid URL, bad format), so any ScraperError that escapes is
+        // an upstream provider failure, not a local bug.
+        AppError::ScraperError(e.to_string())
     }
 }
