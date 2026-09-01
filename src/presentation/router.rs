@@ -349,6 +349,15 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/tool/cek-resi",
             axum::routing::get(crate::presentation::handler::tools::cek_resi_handler),
         )
+        // Image routes
+        .route(
+            "/image/brat",
+            axum::routing::get(crate::presentation::handler::image::brat_handler),
+        )
+        .route(
+            "/image/brat/animated",
+            axum::routing::get(crate::presentation::handler::image::brat_animated_handler),
+        )
         // Health
         .route(
             "/health",

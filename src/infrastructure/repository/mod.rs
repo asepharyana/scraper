@@ -1,5 +1,6 @@
 pub mod alqanime;
 pub mod downloader;
+pub mod image;
 pub mod komik;
 pub mod misc;
 pub mod otakudesu;
