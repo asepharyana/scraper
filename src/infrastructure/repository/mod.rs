@@ -6,6 +6,7 @@ pub mod otakudesu;
 pub mod parsers;
 pub mod proxy;
 pub mod stalk;
+pub mod weebs;
 
 pub use alqanime::AlqanimeRepository;
 pub use downloader::DownloaderRepository;

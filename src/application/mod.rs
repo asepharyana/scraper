@@ -5,3 +5,4 @@ pub mod komik;
 pub mod misc;
 pub mod proxy;
 pub mod stalk;
+pub mod weebs;
