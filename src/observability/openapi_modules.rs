@@ -74,12 +74,8 @@ use utoipa::OpenApi;
         // ── Stalk module ───────────────────────────────────────────
         crate::presentation::handler::stalk::github_handler,
         crate::presentation::handler::stalk::youtube_handler,
-        crate::presentation::handler::stalk::mobile_legends_handler,
-        crate::presentation::handler::stalk::free_fire_handler,
         crate::presentation::handler::stalk::genshin_handler,
         crate::presentation::handler::stalk::twitter_handler,
-        crate::presentation::handler::stalk::tiktok_handler,
-        crate::presentation::handler::stalk::instagram_handler,
         // ── Search module ──────────────────────────────────────────
         crate::presentation::handler::search::bmkg_handler,
         crate::presentation::handler::search::jadwal_sholat_handler,
@@ -109,7 +105,7 @@ use utoipa::OpenApi;
         (name = "komik", description = "Komik endpoints"),
         (name = "download", description = "Media download endpoints (23 platforms)"),
         (name = "misc", description = "Miscellaneous utilities (currency, gold, server)"),
-        (name = "stalk", description = "User profile stalking (GitHub, YT, Twitter, TikTok, IG, FF, ML, Genshin)"),
+        (name = "stalk", description = "User profile stalking (GitHub, YT, Twitter, Genshin)"),
         (name = "search", description = "Search endpoints (BMKG, prayer times, weather, YouTube, Google)"),
         (name = "tool", description = "Utility tools (WHOIS, IP lookup, URL shortener, tracking, hosting)"),
         (name = "image", description = "Image generation (brat static & animated)"),

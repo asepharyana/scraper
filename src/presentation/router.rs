@@ -283,28 +283,12 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::stalk::youtube_handler),
         )
         .route(
-            "/stalk/mobile-legends",
-            axum::routing::get(crate::presentation::handler::stalk::mobile_legends_handler),
-        )
-        .route(
-            "/stalk/free-fire",
-            axum::routing::get(crate::presentation::handler::stalk::free_fire_handler),
-        )
-        .route(
             "/stalk/genshin-impact",
             axum::routing::get(crate::presentation::handler::stalk::genshin_handler),
         )
         .route(
             "/stalk/twitter",
             axum::routing::get(crate::presentation::handler::stalk::twitter_handler),
-        )
-        .route(
-            "/stalk/tiktok",
-            axum::routing::get(crate::presentation::handler::stalk::tiktok_handler),
-        )
-        .route(
-            "/stalk/instagram",
-            axum::routing::get(crate::presentation::handler::stalk::instagram_handler),
         )
         // Search routes
         .route(

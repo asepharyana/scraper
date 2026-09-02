@@ -68,58 +68,6 @@ pub async fn youtube_handler(
     Ok((StatusCode::OK, Json(result)))
 }
 
-/// GET /stalk/mobile-legends?user_id=...&zone_id=... (aliases: userid, zoneid)
-#[utoipa::path(
-    get,
-    path = "/stalk/mobile-legends",
-    tag = "stalk",
-    operation_id = "stalk_mobile_legends",
-    params(StalkParams),
-    responses(
-        (status = 200, description = "Mobile Legends player info", body = Value),
-        (status = 400, description = "Missing user_id/zone_id"),
-        (status = 502, description = "Upstream error"),
-    )
-)]
-pub async fn mobile_legends_handler(
-    Query(params): Query<StalkParams>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let user_id = params
-        .user_id
-        .or(params.userid)
-        .ok_or_else(|| AppError::BadRequest("Missing 'user_id' parameter".to_string()))?;
-    let zone_id = params
-        .zone_id
-        .or(params.zoneid)
-        .ok_or_else(|| AppError::BadRequest("Missing 'zone_id' parameter".to_string()))?;
-    let result = use_cases::mobile_legends(&user_id, &zone_id).await?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
-/// GET /stalk/free-fire?user_id=... (alias: userid)
-#[utoipa::path(
-    get,
-    path = "/stalk/free-fire",
-    tag = "stalk",
-    operation_id = "stalk_free_fire",
-    params(StalkParams),
-    responses(
-        (status = 200, description = "Free Fire player info", body = Value),
-        (status = 400, description = "Missing user_id"),
-        (status = 502, description = "Upstream error"),
-    )
-)]
-pub async fn free_fire_handler(
-    Query(params): Query<StalkParams>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let user_id = params
-        .user_id
-        .or(params.userid)
-        .ok_or_else(|| AppError::BadRequest("Missing 'user_id' parameter".to_string()))?;
-    let result = use_cases::free_fire(&user_id).await?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
 /// GET /stalk/genshin-impact?user_id=... (alias: userid)
 #[utoipa::path(
     get,
@@ -164,51 +112,5 @@ pub async fn twitter_handler(
         .username
         .ok_or_else(|| AppError::BadRequest("Missing 'username' parameter".to_string()))?;
     let result = use_cases::twitter(&username).await?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
-/// GET /stalk/tiktok?username=...
-#[utoipa::path(
-    get,
-    path = "/stalk/tiktok",
-    tag = "stalk",
-    operation_id = "stalk_tiktok",
-    params(StalkParams),
-    responses(
-        (status = 200, description = "TikTok user profile", body = Value),
-        (status = 400, description = "Missing username"),
-        (status = 502, description = "Upstream error"),
-    )
-)]
-pub async fn tiktok_handler(
-    Query(params): Query<StalkParams>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let username = params
-        .username
-        .ok_or_else(|| AppError::BadRequest("Missing 'username' parameter".to_string()))?;
-    let result = use_cases::tiktok(&username).await?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
-/// GET /stalk/instagram?username=...
-#[utoipa::path(
-    get,
-    path = "/stalk/instagram",
-    tag = "stalk",
-    operation_id = "stalk_instagram",
-    params(StalkParams),
-    responses(
-        (status = 200, description = "Instagram user profile", body = Value),
-        (status = 400, description = "Missing username"),
-        (status = 502, description = "Upstream error"),
-    )
-)]
-pub async fn instagram_handler(
-    Query(params): Query<StalkParams>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let username = params
-        .username
-        .ok_or_else(|| AppError::BadRequest("Missing 'username' parameter".to_string()))?;
-    let result = use_cases::instagram(&username).await?;
     Ok((StatusCode::OK, Json(result)))
 }
