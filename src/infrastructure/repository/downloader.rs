@@ -1425,11 +1425,12 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
     extract_youtube_id(url)
         .ok_or_else(|| ScrapingError::Http("Invalid YouTube URL".to_string()))?;
 
+    let q = quality.trim_end_matches('p');
     let fmt = format!(
-        "bestvideo[height<={}]/best+bestaudio/best",
-        quality.trim_end_matches('p')
+        "bestvideo[height<={}]+bestaudio/best[height<={}]/best",
+        q, q
     );
-    let data = run_ytdlp_json(url, &["-f", &fmt]).await?;
+    let data = run_ytdlp_json(url, &["-f", &fmt, "--merge-output-format", "mp4"]).await?;
 
     let title = data
         .get("title")
@@ -1463,15 +1464,20 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
                 f.get("url").and_then(|v| v.as_str()),
                 f.get("ext").and_then(|v| v.as_str()),
             ) {
-                if ext_val == "mhtml" {
+                // Skip storyboard, mhtml, audio-only, and m3u8/hls streams.
+                // We only want merged mp4/webm containers with both vcodec+acodec.
+                if ext_val == "mhtml" || ext_val == "m3u8" || ext_val == "m4a" {
                     continue;
                 }
+                // Skip formats without a URL
                 let url_string = furl.to_string();
+                // Skip formats whose URL doesn't have an actual video URL
+                if !url_string.starts_with("http") {
+                    continue;
+                }
                 if seen.insert(url_string.clone()) {
                     let fmt_type = if ext_val == "mp4" || ext_val == "webm" || ext_val == "mkv" {
                         MediaType::Video
-                    } else if ext_val == "mp3" || ext_val == "m4a" || ext_val == "webm" {
-                        MediaType::Audio
                     } else {
                         MediaType::File
                     };
