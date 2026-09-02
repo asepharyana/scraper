@@ -1,4 +1,4 @@
-//! Infrastructure — Stalk utilities (github, youtube, genshin, twitter).
+//! Infrastructure — Stalk utilities (github, youtube, twitter).
 //!
 //! Ported from Shirokami-API `scraper/stalk/*.js`.
 
@@ -415,33 +415,6 @@ fn video_from_grid_video(gv: &Value) -> Value {
         v["duration"] = dur;
     }
     v
-}
-
-// ---------------------------------------------------------------------------
-// Genshin Impact — enka.network public API
-// ---------------------------------------------------------------------------
-
-pub async fn fetch_genshin_stalk(user_id: &str) -> Result<Value, String> {
-    let url = format!("https://enka.network/u/{}/__data.json", user_id);
-    let resp = http_client()
-        .client()
-        .get(&url)
-        .header(
-            USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36",
-        )
-        .send()
-        .await
-        .map_err(|e| format!("HTTP: {}", e))?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err("User tidak ditemukan".into());
-    }
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let data: Value = resp.json().await.map_err(|e| format!("JSON: {}", e))?;
-    // Pass through the raw JSON (Enka __data.json is already structured).
-    Ok(data)
 }
 
 // ---------------------------------------------------------------------------

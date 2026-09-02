@@ -18,13 +18,6 @@ pub async fn youtube(username: &str) -> Result<Value, ScrapingError> {
         .map_err(ScrapingError::Http)
 }
 
-/// Genshin Impact player stalk.
-pub async fn genshin(user_id: &str) -> Result<Value, ScrapingError> {
-    Repo::fetch_genshin_stalk(user_id)
-        .await
-        .map_err(ScrapingError::Http)
-}
-
 /// Twitter/X user stalk.
 pub async fn twitter(username: &str) -> Result<Value, ScrapingError> {
     Repo::fetch_twitter_stalk(username)

@@ -68,30 +68,6 @@ pub async fn youtube_handler(
     Ok((StatusCode::OK, Json(result)))
 }
 
-/// GET /stalk/genshin-impact?user_id=... (alias: userid)
-#[utoipa::path(
-    get,
-    path = "/stalk/genshin-impact",
-    tag = "stalk",
-    operation_id = "stalk_genshin",
-    params(StalkParams),
-    responses(
-        (status = 200, description = "Genshin Impact profile", body = Value),
-        (status = 400, description = "Missing user_id"),
-        (status = 502, description = "Upstream error"),
-    )
-)]
-pub async fn genshin_handler(
-    Query(params): Query<StalkParams>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let user_id = params
-        .user_id
-        .or(params.userid)
-        .ok_or_else(|| AppError::BadRequest("Missing 'user_id' parameter".to_string()))?;
-    let result = use_cases::genshin(&user_id).await?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
 /// GET /stalk/twitter?username=...
 #[utoipa::path(
     get,

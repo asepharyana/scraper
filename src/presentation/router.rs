@@ -283,10 +283,6 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::stalk::youtube_handler),
         )
         .route(
-            "/stalk/genshin-impact",
-            axum::routing::get(crate::presentation::handler::stalk::genshin_handler),
-        )
-        .route(
             "/stalk/twitter",
             axum::routing::get(crate::presentation::handler::stalk::twitter_handler),
         )
