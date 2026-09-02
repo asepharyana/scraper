@@ -1456,22 +1456,87 @@ pub async fn fetch_youtube_mp4(url: &str, quality: &str) -> Result<DownloadResul
     result.provider = Some("yt-dlp".to_string());
 
     let formats = data.get("formats").and_then(|v| v.as_array());
+    let requested_formats = data.get("requested_formats").and_then(|v| v.as_array());
     let mut seen = std::collections::HashSet::new();
 
-    if let Some(fmts) = formats {
+    // When yt-dlp uses a merged format (bestvideo+bestaudio), the actual
+    // download URLs live in `requested_formats` (video + audio separate URLs).
+    // The top-level `url` is empty and `formats[]` is the FULL list of all
+    // individual format IDs, not just the selected ones.
+    if let Some(rf) = requested_formats {
+        for f in rf {
+            if let (Some(furl), Some(ext_val)) = (
+                f.get("url").and_then(|v| v.as_str()),
+                f.get("ext").and_then(|v| v.as_str()),
+            ) {
+                let proto = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+                // Skip mhtml/storyboard and m3u8/hls streams
+                if ext_val == "mhtml" || proto.contains("m3u8") {
+                    continue;
+                }
+                let url_string = furl.to_string();
+                if !url_string.starts_with("http") {
+                    continue;
+                }
+                if seen.insert(url_string.clone()) {
+                    let is_video = f.get("vcodec").and_then(|v| v.as_str()).map(|c| c != "none").unwrap_or(false);
+                    let is_audio_only = f.get("acodec").and_then(|v| v.as_str()).map(|c| c != "none").unwrap_or(false);
+                    let fmt_type = if is_video && is_audio_only {
+                        MediaType::Video
+                    } else if is_audio_only {
+                        MediaType::Audio
+                    } else if is_video {
+                        MediaType::Video
+                    } else {
+                        MediaType::File
+                    };
+                    let q = format!("{}p", f.get("height").and_then(|v| v.as_u64()).unwrap_or(0));
+                    result.media.push(MediaItem {
+                        url: url_string,
+                        quality: Some(q),
+                        file_type: Some(fmt_type),
+                        extension: Some(ext_val.to_string()),
+                        thumbnail: data
+                            .get("thumbnail")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        file_size: f
+                            .get("filesize")
+                            .and_then(|v| v.as_u64())
+                            .map(format_filesize),
+                        size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
+                        frame_width: f
+                            .get("width")
+                            .and_then(|v| v.as_u64())
+                            .map(|w| w.to_string()),
+                        frame_height: f
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .map(|h| h.to_string()),
+                        note: None,
+                    });
+                }
+            }
+        }
+    } else if let Some(fmts) = formats {
         for f in fmts {
             if let (Some(furl), Some(ext_val)) = (
                 f.get("url").and_then(|v| v.as_str()),
                 f.get("ext").and_then(|v| v.as_str()),
             ) {
-                // Skip storyboard, mhtml, audio-only, and m3u8/hls streams.
-                // We only want merged mp4/webm containers with both vcodec+acodec.
-                if ext_val == "mhtml" || ext_val == "m3u8" || ext_val == "m4a" {
+                // Skip storyboard, mhtml, m3u8/hls, and audio-only formats.
+                // We only want formats that have both video and audio.
+                let proto = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+                if ext_val == "mhtml" || proto.contains("m3u8") {
                     continue;
                 }
-                // Skip formats without a URL
+                // Skip audio-only formats (vcodec == "none", acodec != "none")
+                let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
+                let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
+                if vcodec == "none" && acodec != "none" {
+                    continue; // audio-only
+                }
                 let url_string = furl.to_string();
-                // Skip formats whose URL doesn't have an actual video URL
                 if !url_string.starts_with("http") {
                     continue;
                 }
