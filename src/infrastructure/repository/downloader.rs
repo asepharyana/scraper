@@ -2804,33 +2804,54 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
 
     let surl = surl.ok_or_else(|| ScrapingError::Http("SURL not found.".to_string()))?;
 
+    // Call local TeraBox resolver (Playwright + residential proxy + cookies)
+    let resolver_url = std::env::var("TERABOX_RESOLVER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4092".to_string());
+    let resolve_url = format!("{}/resolve?surl={}", resolver_url, surl);
+
     let client = http_client();
     let resp = client
         .client()
-        .get("https://tera2.sylyt93.workers.dev/info")
-        .query(&[("s", &surl)])
-        .header("origin", "https://www.kauruka.com")
-        .header("referer", "https://www.kauruka.com/")
+        .get(&resolve_url)
         .header(USER_AGENT, "Mozilla/5.0")
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| ScrapingError::Http(format!("TeraBox info fetch failed: {}", e)))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ScrapingError::Http(format!("TeraBox JSON parse failed: {}", e)))?;
+        .map_err(|e| ScrapingError::Http(format!("TeraBox resolver fetch failed: {}", e)))?;
 
-    if let Some(download_url) = resp.get("url").and_then(|v| v.as_str()) {
-        let mut result = DownloadResult::success(
-            resp.get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        );
-        result.provider = Some("terabox".to_string());
-        result.thumbnail = resp
-            .get("img")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(DownloadResult::error(format!(
+            "TeraBox resolver returned HTTP {}: {}",
+            status, body
+        )));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ScrapingError::Http(format!("TeraBox resolver JSON parse failed: {}", e)))?;
+
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Ok(DownloadResult::error(error));
+    }
+
+    let file_name = data
+        .get("file_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut result = DownloadResult::success(file_name.clone());
+    result.provider = Some("terabox".to_string());
+    result.thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Primary download link
+    if let Some(download_url) = data.get("download_link").and_then(|v| v.as_str()) {
+        let size_bytes = data.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
 
         result.media.push(MediaItem {
             url: download_url.to_string(),
@@ -2838,21 +2859,39 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
             file_type: Some(MediaType::File),
             extension: None,
             thumbnail: None,
-            file_size: None,
-            size_bytes: None,
+            file_size: Some(format_filesize(size_bytes)),
+            size_bytes: Some(size_bytes),
             frame_width: None,
             frame_height: None,
             note: None,
         });
 
-        Ok(result)
-    } else {
-        Ok(DownloadResult::error(
-            resp.get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Failed to fetch TeraBox info"),
-        ))
+        // Directory: add child file links
+        if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+            for f in files {
+                if let Some(furl) = f.get("download_link").and_then(|v| v.as_str()) {
+                    let fsize = f.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                    result.media.push(MediaItem {
+                        url: furl.to_string(),
+                        quality: None,
+                        file_type: Some(MediaType::File),
+                        extension: None,
+                        thumbnail: None,
+                        file_size: Some(format_filesize(fsize)),
+                        size_bytes: Some(fsize),
+                        frame_width: None,
+                        frame_height: None,
+                        note: f
+                            .get("file_name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    });
+                }
+            }
+        }
     }
+
+    Ok(result)
 }
 
 pub async fn fetch_videy(url: &str) -> Result<DownloadResult, ScrapingError> {
