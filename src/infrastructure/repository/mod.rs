@@ -1,4 +1,3 @@
-pub mod ai;
 pub mod alqanime;
 pub mod downloader;
 pub mod image;
@@ -10,8 +9,6 @@ pub mod proxy;
 pub mod search;
 pub mod stalk;
 pub mod tools;
-pub mod uploader;
-pub mod weebs;
 
 pub use alqanime::AlqanimeRepository;
 pub use downloader::DownloaderRepository;

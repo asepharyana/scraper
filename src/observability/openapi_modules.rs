@@ -80,12 +80,6 @@ use utoipa::OpenApi;
         crate::presentation::handler::stalk::twitter_handler,
         crate::presentation::handler::stalk::tiktok_handler,
         crate::presentation::handler::stalk::instagram_handler,
-        // ── Weebs module ───────────────────────────────────────────
-        crate::presentation::handler::weebs::anime_info_handler,
-        crate::presentation::handler::weebs::manga_info_handler,
-        crate::presentation::handler::weebs::whatanime_handler,
-        crate::presentation::handler::weebs::sfw_waifu_handler,
-        crate::presentation::handler::weebs::nsfw_waifu_handler,
         // ── Search module ──────────────────────────────────────────
         crate::presentation::handler::search::bmkg_handler,
         crate::presentation::handler::search::jadwal_sholat_handler,
@@ -102,13 +96,6 @@ use utoipa::OpenApi;
         // ── Image module ───────────────────────────────────────────
         crate::presentation::handler::image::brat_handler,
         crate::presentation::handler::image::brat_animated_handler,
-        // ── Uploader module ────────────────────────────────────────
-        crate::presentation::handler::uploader::ryzencdn_handler,
-        crate::presentation::handler::uploader::serve_file_handler,
-        // ── AI module ──────────────────────────────────────────────
-        crate::presentation::handler::ai::chat_handler,
-        crate::presentation::handler::ai::gemini_handler,
-        crate::presentation::handler::ai::image_handler,
     ),
     components(
         schemas(
@@ -123,12 +110,9 @@ use utoipa::OpenApi;
         (name = "download", description = "Media download endpoints (23 platforms)"),
         (name = "misc", description = "Miscellaneous utilities (currency, gold, server)"),
         (name = "stalk", description = "User profile stalking (GitHub, YT, Twitter, TikTok, IG, FF, ML, Genshin)"),
-        (name = "weebs", description = "Weeb endpoints (anime info, manga, anime search, waifu)"),
         (name = "search", description = "Search endpoints (BMKG, prayer times, weather, YouTube, Google)"),
         (name = "tool", description = "Utility tools (WHOIS, IP lookup, URL shortener, tracking, hosting)"),
         (name = "image", description = "Image generation (brat static & animated)"),
-        (name = "uploader", description = "File upload and serve"),
-        (name = "ai", description = "AI endpoints (chat, gemini, image generation)"),
     )
 )]
 pub struct ModuleApiDoc;

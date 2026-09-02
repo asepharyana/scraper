@@ -306,27 +306,6 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             "/stalk/instagram",
             axum::routing::get(crate::presentation::handler::stalk::instagram_handler),
         )
-        // Weebs routes
-        .route(
-            "/weebs/anime-info",
-            axum::routing::get(crate::presentation::handler::weebs::anime_info_handler),
-        )
-        .route(
-            "/weebs/manga-info",
-            axum::routing::get(crate::presentation::handler::weebs::manga_info_handler),
-        )
-        .route(
-            "/weebs/whatanime",
-            axum::routing::get(crate::presentation::handler::weebs::whatanime_handler),
-        )
-        .route(
-            "/weebs/sfw-waifu",
-            axum::routing::get(crate::presentation::handler::weebs::sfw_waifu_handler),
-        )
-        .route(
-            "/weebs/nsfw-waifu",
-            axum::routing::get(crate::presentation::handler::weebs::nsfw_waifu_handler),
-        )
         // Search routes
         .route(
             "/search/bmkg",
@@ -381,28 +360,6 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
         .route(
             "/image/brat/animated",
             axum::routing::get(crate::presentation::handler::image::brat_animated_handler),
-        )
-        // Uploader routes
-        .route(
-            "/uploader/ryzencdn",
-            axum::routing::post(crate::presentation::handler::uploader::ryzencdn_handler),
-        )
-        .route(
-            "/uploader/file/{name}",
-            axum::routing::get(crate::presentation::handler::uploader::serve_file_handler),
-        )
-        // AI routes
-        .route(
-            "/ai/chat",
-            axum::routing::get(crate::presentation::handler::ai::chat_handler),
-        )
-        .route(
-            "/ai/gemini",
-            axum::routing::get(crate::presentation::handler::ai::gemini_handler),
-        )
-        .route(
-            "/ai/image",
-            axum::routing::get(crate::presentation::handler::ai::image_handler),
         )
         // Health
         .route(
