@@ -185,6 +185,10 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::downloader::download_youtube_mp3),
         )
         .route(
+            "/file/yt_merge/{filename}",
+            axum::routing::get(crate::presentation::handler::downloader::serve_merged_file),
+        )
+        .route(
             "/download/spotify",
             axum::routing::get(crate::presentation::handler::downloader::download_spotify),
         )

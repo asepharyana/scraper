@@ -21,6 +21,9 @@ pub struct DownloadParams {
     pub cookies: Option<String>,
     pub api_key: Option<String>,
     pub quality: Option<String>,
+    /// When `true`, YouTube downloads are merged server-side (video + audio
+    /// into a single MP4) instead of returning separate video/audio URLs.
+    pub merge: Option<String>,
 }
 
 // ========================================================================
@@ -44,7 +47,25 @@ pub struct DownloadParams {
 pub async fn download(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
-    let result = use_cases::download_all_in_one(&params.url, params.cookies.as_deref()).await?;
+    let merge = params
+        .merge
+        .as_deref()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let result = if merge {
+        // All-in-one with merge=true → force merge for YouTube URLs.
+        if crate::application::downloader::detect_platform(&params.url) == "youtube" {
+            use_cases::download_youtube_merge(
+                &params.url,
+                params.quality.as_deref().unwrap_or("720"),
+            )
+            .await?
+        } else {
+            use_cases::download_all_in_one(&params.url, params.cookies.as_deref()).await?
+        }
+    } else {
+        use_cases::download_all_in_one(&params.url, params.cookies.as_deref()).await?
+    };
     Ok(Json(DownloadResponse::ok(result)))
 }
 
@@ -152,9 +173,17 @@ pub async fn download_tiktok(
 pub async fn download_youtube(
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<DownloadResponse>, AppError> {
-    let result =
-        use_cases::download_youtube(&params.url, params.quality.as_deref().unwrap_or("720"))
-            .await?;
+    let quality = params.quality.as_deref().unwrap_or("720");
+    let merge = params
+        .merge
+        .as_deref()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let result = if merge {
+        use_cases::download_youtube_merge(&params.url, quality).await?
+    } else {
+        use_cases::download_youtube(&params.url, quality).await?
+    };
     Ok(Json(DownloadResponse::ok(result)))
 }
 
@@ -555,4 +584,63 @@ pub async fn download_bilibili(
 ) -> Result<Json<DownloadResponse>, AppError> {
     let result = use_cases::download_bilibili(&params.url).await?;
     Ok(Json(DownloadResponse::ok(result)))
+}
+
+// ========================================================================
+// Merged-file static serving
+// ========================================================================
+
+/// Serve a merged YouTube MP4 produced by `/download/youtube?merge=true`.
+/// Path is sanitised: only a plain filename (no `/`, `..`) inside the
+/// `yt_merge` uploads dir is allowed.
+///
+/// `/file/yt_merge/{filename}`
+#[utoipa::path(
+    get,
+    path = "/file/yt_merge/{filename}",
+    tag = "download",
+    operation_id = "dl_serve_merged_file",
+    params(
+        ("filename" = String, Path, description = "Merged MP4 file name")
+    ),
+    responses(
+        (status = 200, description = "Merged MP4 file", content_type = "video/mp4"),
+        (status = 404, description = "File not found or invalid name")
+    )
+)]
+pub async fn serve_merged_file(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    // Reject any path traversal or nested segments.
+    if filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+        || filename.is_empty()
+    {
+        return Err(AppError::NotFound(format!("invalid file name: {filename}")));
+    }
+
+    let dir = std::path::PathBuf::from("/var/lib/scraper/uploads/yt_merge");
+    let path = dir.join(&filename);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| AppError::NotFound(format!("file not found: {filename}")))?;
+
+    let content_type = if filename.ends_with(".mp4") {
+        "video/mp4"
+    } else if filename.ends_with(".webm") {
+        "video/webm"
+    } else {
+        "application/octet-stream"
+    };
+
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", content_type)
+        .header("Content-Length", bytes.len().to_string())
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| AppError::Internal(format!("build response: {e}")))?)
 }

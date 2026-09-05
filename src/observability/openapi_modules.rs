@@ -66,6 +66,7 @@ use utoipa::OpenApi;
         crate::presentation::handler::downloader::download_streamable,
         crate::presentation::handler::downloader::download_videy,
         crate::presentation::handler::downloader::download_bilibili,
+        crate::presentation::handler::downloader::serve_merged_file,
         // ── Misc module ────────────────────────────────────────────
         crate::presentation::handler::misc::currency_converter_handler,
         crate::presentation::handler::misc::harga_emas_handler,

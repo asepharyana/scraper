@@ -42,6 +42,13 @@ pub async fn download_youtube(url: &str, quality: &str) -> Result<DownloadResult
     DownloaderRepository::download_youtube(url, quality).await
 }
 
+pub async fn download_youtube_merge(
+    url: &str,
+    quality: &str,
+) -> Result<DownloadResult, ScrapingError> {
+    DownloaderRepository::fetch_youtube_merge(url, quality).await
+}
+
 pub async fn download_youtube_mp3(url: &str) -> Result<DownloadResult, ScrapingError> {
     DownloaderRepository::download_youtube_mp3(url).await
 }
