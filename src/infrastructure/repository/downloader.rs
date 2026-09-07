@@ -872,6 +872,7 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
         .unwrap()
         .is_match(url);
     let valid_ig = url.contains("instagram.com")
+        || url.contains("threads.net")
         || regex::Regex::new(r"https?://(www\.)?instagram\.com/[^\s]+")
             .unwrap()
             .is_match(url);
@@ -3478,20 +3479,9 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
     if let Some(download_url) = data.get("download_link").and_then(|v| v.as_str()) {
         let size_bytes = data.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
 
-        result.media.push(MediaItem {
-            url: download_url.to_string(),
-            quality: None,
-            file_type: Some(MediaType::File),
-            extension: None,
-            thumbnail: None,
-            file_size: Some(format_filesize(size_bytes)),
-            size_bytes: Some(size_bytes),
-            frame_width: None,
-            frame_height: None,
-            note: None,
-        });
-        // A second entry pointing to the cookie-authenticated proxy — this one
-        // is what actually downloads when the user clicks it.
+        // PRIMARY = the cookie-authenticated public proxy. The raw terabox
+        // dlink is only a secondary entry — it 403s without cookies, so it
+        // must NOT be the first link users see.
         result.media.push(MediaItem {
             url: proxy_dl.clone(),
             quality: None,
@@ -3502,10 +3492,19 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
             size_bytes: Some(size_bytes),
             frame_width: None,
             frame_height: None,
-            note: Some(
-                "Direct download via cookie-authenticated proxy (works without TeraBox cookies)"
-                    .into(),
-            ),
+            note: Some("Direct download via cookie-authenticated proxy (works).".into()),
+        });
+        result.media.push(MediaItem {
+            url: download_url.to_string(),
+            quality: None,
+            file_type: Some(MediaType::File),
+            extension: None,
+            thumbnail: None,
+            file_size: Some(format_filesize(size_bytes)),
+            size_bytes: Some(size_bytes),
+            frame_width: None,
+            frame_height: None,
+            note: Some("Raw CDN link (may require a TeraBox session cookie).".into()),
         });
 
         // Directory: add child file links
