@@ -209,6 +209,10 @@ pub fn build_router(app_state: Arc<AppState>) -> anyhow::Result<Router> {
             axum::routing::get(crate::presentation::handler::downloader::download_terabox),
         )
         .route(
+            "/proxy/terabox",
+            axum::routing::get(crate::presentation::handler::downloader::proxy_terabox),
+        )
+        .route(
             "/download/gdrive",
             axum::routing::get(crate::presentation::handler::downloader::download_gdrive),
         )

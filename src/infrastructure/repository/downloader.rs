@@ -854,12 +854,25 @@ async fn detect_media_type(url: &str) -> MediaType {
 /// SnapSave parser — extracts Instagram/Facebook media via snapsave.app.
 /// Uses downr.org as fallback for robustness, then Playwright browser scraping.
 pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, ScrapingError> {
-    // Validate Instagram/Facebook URL
-    let valid_fb = regex::Regex::new(r"https?://(web\.|www\.|m\.)(facebook|fb)\.(com|watch)\S+")
+    // Validate Instagram/Facebook URL.
+    //
+    // Facebook link shapes (all must pass):
+    //   https://www.facebook.com/watch/?v=123
+    //   https://fb.watch/abc123/
+    //   https://m.facebook.com/video.php?v=123
+    //   https://www.facebook.com/100012345678901/videos/1234567890
+    //   https://www.facebook.com/reel/123
+    //   https://www.facebook.com/story.php?story_fbid=123
+    //   https://web.facebook.com/...
+    // NOTE: the old regex required a `www.|m.|web.` subdomain AND ended the
+    // host capture with `(facebook|fb)\.(com|watch)` — that rejected
+    // `facebook.com/watch...` (no subdomain) and `fb.watch/...` entirely.
+    let fb_host = r"(?:[a-z0-9-]*\.)?(?:facebook|fb)\.(?:com|watch)";
+    let valid_fb = regex::Regex::new(&format!(r"https?://{}(?:/|$)", fb_host))
         .unwrap()
         .is_match(url);
-    let valid_ig =
-        regex::Regex::new(r"https?://(www\.)?instagram\.com/(p|reel|reels|tv|stories)/\S+")
+    let valid_ig = url.contains("instagram.com")
+        || regex::Regex::new(r"https?://(www\.)?instagram\.com/[^\s]+")
             .unwrap()
             .is_match(url);
 
@@ -869,7 +882,24 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
         ));
     }
 
-    // Try downr.org first
+    // Try well-known scrapers in order — Playwright is a LAST resort (heavy,
+    // slow, and its naive response-harvesting returns many broken/404 links
+    // mixed with the one good URL, which is exactly the "link exists but can't
+    // download" bug we've seen).
+    //
+    // 1) yt-dlp facebook extractor — authoritative, returns direct fbcdn
+    //    progressive URLs with REAL title/format metadata and only the working
+    //    scales (sd + hd, no junk). Also handles /reel, /watch, /videos,
+    //    story.php, video.php, fb.watch URL shapes.
+    if let Ok(yt) = run_ytdlp_json(url, &["-f", "bestvideo+bestaudio/best"]).await {
+        if let Some(res) = ytdlp_to_download_result(&yt) {
+            if !res.media.is_empty() {
+                return Ok(res);
+            }
+        }
+    }
+
+    // 2) downr.org all-in-one (same provider as Shirokami's /fbdl)
     match fetch_all_in_one(url).await {
         Ok(result) if !result.media.is_empty() => return Ok(result),
         Ok(_) => {}
@@ -881,7 +911,7 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
         }
     }
 
-    // Fallback: use Playwright browser scraping to extract video URLs
+    // 3) Playwright browser scraping to extract video URLs
     let platform = if valid_ig { "instagram" } else { "facebook" };
     let data = run_playwright_scraper(url, platform).await?;
 
@@ -899,17 +929,25 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
     let media_arr = data.get("media").and_then(|v| v.as_array());
     if let Some(medias) = media_arr {
         for m in medias {
+            let u = m
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Drop Playwright-harvested links that are actually broken
+            // byte-range chunks (fbcdn URLs with bytestart=…byteend=… that
+            // return tiny 200 responses — they 404 or return an HTML error
+            // page when fetched as a whole), and the empty-string url.
+            if u.is_empty() || u.contains("bytestart=") {
+                continue;
+            }
             let item = MediaItem {
-                url: m
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                url: u,
                 quality: None,
-                file_type: m.get("ext").and_then(|v| v.as_str()).and_then(|e| match e {
-                    "mp4" | "m3u8" => Some(MediaType::Video),
-                    "mp3" | "m4a" => Some(MediaType::Audio),
-                    _ => Some(MediaType::Video),
+                file_type: m.get("ext").and_then(|v| v.as_str()).map(|e| match e {
+                    "mp4" | "m3u8" => MediaType::Video,
+                    "mp3" | "m4a" => MediaType::Audio,
+                    _ => MediaType::Video,
                 }),
                 extension: m.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 thumbnail: None,
@@ -923,6 +961,13 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
         }
     }
 
+    // De-duplicate by URL (Playwright harvests the same CDN file at many
+    // byte-ranges, and the primary URL appears multiple times).
+    {
+        let mut seen = std::collections::HashSet::new();
+        result.media.retain(|m| seen.insert(m.url.clone()));
+    }
+
     if result.media.is_empty() {
         return Ok(DownloadResult::error(format!(
             "Failed to extract media from {} — server IP may be blocked by anti-bot protection",
@@ -931,6 +976,122 @@ pub(crate) async fn fetch_snapsave(url: &str) -> Result<DownloadResult, Scraping
     }
 
     Ok(result)
+}
+
+/// Convert a yt-dlp --dump-single-json result into a DownloadResult with the
+/// direct progressive/adaptive media URLs (only entries that carry a URL).
+/// Used by the Facebook downloader as the primary provider.
+fn ytdlp_to_download_result(data: &serde_json::Value) -> Option<DownloadResult> {
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut result = DownloadResult::success(title);
+    result.provider = Some("yt-dlp".to_string());
+    result.thumbnail = data
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    result.duration = data
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .map(|d| format!("{}s", d));
+
+    let formats = data.get("formats").and_then(|v| v.as_array());
+    let requested_formats = data.get("requested_formats").and_then(|v| v.as_array());
+    let mut seen = std::collections::HashSet::new();
+
+    // `-f bestvideo+bestaudio/best` puts the merged URLs in requested_formats.
+    // `best` single format lands in top-level url + formats[0].
+    for list in [requested_formats, formats].into_iter().flatten() {
+        for f in list {
+            let Some(furl) = f.get("url").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !furl.starts_with("http") || !seen.insert(furl.to_string()) {
+                continue;
+            }
+            let proto = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+            if proto.contains("m3u8")
+                || f.get("vcodec").and_then(|v| v.as_str()) == Some("none")
+                    && f.get("acodec").and_then(|v| v.as_str()) != Some("none")
+            {
+                // Skip HLS + audio-only; Facebook's progressive mp4s are direct.
+                continue;
+            }
+            let ext: String = f
+                .get("ext")
+                .and_then(|v| v.as_str())
+                .unwrap_or("mp4")
+                .to_string();
+            result.media.push(MediaItem {
+                url: furl.to_string(),
+                quality: f
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .map(|h| format!("{}p", h))
+                    .or_else(|| {
+                        f.get("format_note")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    }),
+                file_type: Some(if ext == "mp4" || ext == "webm" || ext == "mkv" {
+                    MediaType::Video
+                } else {
+                    MediaType::File
+                }),
+                extension: Some(ext),
+                thumbnail: result.thumbnail.clone(),
+                file_size: f
+                    .get("filesize")
+                    .and_then(|v| v.as_u64())
+                    .map(format_filesize),
+                size_bytes: f.get("filesize").and_then(|v| v.as_u64()),
+                frame_width: f
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .map(|w| w.to_string()),
+                frame_height: f
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .map(|h| h.to_string()),
+                note: None,
+            });
+        }
+    }
+
+    // Fall back to the merged top-level URL (bestvideo+bestaudio sets it).
+    if result.media.is_empty() {
+        if let Some(dl_url) = data.get("url").and_then(|v| v.as_str()) {
+            if dl_url.starts_with("http") {
+                result.media.push(MediaItem {
+                    url: dl_url.to_string(),
+                    quality: None,
+                    file_type: Some(MediaType::Video),
+                    extension: data
+                        .get("ext")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some("mp4".to_string())),
+                    thumbnail: None,
+                    file_size: data
+                        .get("filesize")
+                        .and_then(|v| v.as_u64())
+                        .map(format_filesize),
+                    size_bytes: data.get("filesize").and_then(|v| v.as_u64()),
+                    frame_width: None,
+                    frame_height: None,
+                    note: None,
+                });
+            }
+        }
+    }
+
+    if result.media.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 /// TikTok via embed-page scraping (primary method).
 /// Scrapes `https://www.tiktok.com/embed/v2/{video_id}` HTML and extracts the
@@ -3292,7 +3453,28 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Primary download link
+    // Primary download link.
+    //
+    // IMPORTANT: the resolver's download_link is a raw terabox dlink that
+    // 403s with {"error_code":31045,"user not exists"} when fetched WITHOUT
+    // cookies — even from residential IPs. So we rewrite the public URL to
+    // OUR OWN /proxy/terabox streaming endpoint (which forwards the resolver's
+    // cookie-authenticated stream through the public API). This is the only
+    // way users get a link that actually downloads.
+    // The public API base that users can reach. `CONFIG.urls.site_url` is the
+    // main site (hub → 4003) — NOT the scraper API domain. Use an explicit
+    // env override (TERABOX_PUBLIC_BASE_URL), falling back to the scraper's
+    // own public domain via site_url only when it's clearly the API host.
+    let public_base = std::env::var("TERABOX_PUBLIC_BASE_URL").unwrap_or_else(|_| {
+        let site = crate::config::CONFIG.urls.site_url.clone();
+        if site.contains("scraper") || site.contains("api") {
+            site
+        } else {
+            // default to the scraper API subdomain (this API's public host)
+            "https://api.asepharyana.my.id".to_string()
+        }
+    });
+    let proxy_dl = format!("{}/proxy/terabox?surl={}", public_base, surl);
     if let Some(download_url) = data.get("download_link").and_then(|v| v.as_str()) {
         let size_bytes = data.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -3307,6 +3489,23 @@ pub async fn fetch_terabox(url: &str) -> Result<DownloadResult, ScrapingError> {
             frame_width: None,
             frame_height: None,
             note: None,
+        });
+        // A second entry pointing to the cookie-authenticated proxy — this one
+        // is what actually downloads when the user clicks it.
+        result.media.push(MediaItem {
+            url: proxy_dl.clone(),
+            quality: None,
+            file_type: Some(MediaType::File),
+            extension: None,
+            thumbnail: None,
+            file_size: Some(format_filesize(size_bytes)),
+            size_bytes: Some(size_bytes),
+            frame_width: None,
+            frame_height: None,
+            note: Some(
+                "Direct download via cookie-authenticated proxy (works without TeraBox cookies)"
+                    .into(),
+            ),
         });
 
         // Directory: add child file links

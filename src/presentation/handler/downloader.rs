@@ -313,6 +313,101 @@ pub async fn download_terabox(
     Ok(Json(DownloadResponse::ok(result)))
 }
 
+/// Stream a TeraBox file through this API.
+/// `/proxy/terabox?surl=...`
+///
+/// The resolver's `/download` endpoint replays the full 302 chain WITH
+/// cookies and streams real bytes — this handler forwards those bytes to the
+/// caller so the returned URL is a public, downloadable link (not a 403
+/// dlink, not a private 127.0.0.1 URL).
+#[utoipa::path(
+    get,
+    path = "/proxy/terabox",
+    tag = "download",
+    operation_id = "dl_proxy_terabox",
+    params(
+        ("surl" = String, Query, description = "TeraBox share short URL ID"),
+        ("filename" = Option<String>, Query, description = "Download file name hint"),
+    ),
+    responses(
+        (status = 200, description = "File stream"),
+        (status = 400, description = "Missing surl"),
+        (status = 502, description = "Upstream error"),
+    )
+)]
+pub async fn proxy_terabox(
+    Query(params): Query<TeraboxProxyParams>,
+) -> Result<axum::response::Response, AppError> {
+    let surl = params.surl;
+    if surl.is_empty() {
+        return Err(AppError::BadRequest("missing surl parameter".into()));
+    }
+
+    let resolver_url = std::env::var("TERABOX_RESOLVER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4092".to_string());
+    let fetch_url = format!("{}/download?surl={}", resolver_url, surl);
+
+    // Ask the resolver for the redirect chain (it follows 302s internally with
+    // cookies) — but we only want the final CDN stream URL. The resolver
+    // already streams; simplest reliable path is to just proxy the resolver's
+    // response body as-is.
+    let client = crate::infrastructure::utils::http_client::http_client();
+
+    let resp = client
+        .client()
+        .get(&fetch_url)
+        .header("User-Agent", "Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| AppError::ScraperError(format!("terabox proxy fetch failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::ScraperError(format!(
+            "terabox proxy returned HTTP {status}: {body}"
+        )));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let content_disposition = resp
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            let fname = params
+                .filename
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "terabox-download.bin".to_string());
+            format!("attachment; filename=\"{fname}\"")
+        });
+
+    let stream = resp.bytes_stream();
+
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", content_type)
+        .header("Content-Disposition", content_disposition)
+        .header("X-Accel-Buffering", "no")
+        .header("Cache-Control", "no-store")
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|e| AppError::Internal(format!("build stream response: {e}")))?)
+}
+
+/// Params for the TeraBox streaming proxy.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct TeraboxProxyParams {
+    pub surl: String,
+    pub filename: Option<String>,
+}
+
 /// Download from Google Drive.
 /// `/download/gdrive?url=...`
 #[utoipa::path(

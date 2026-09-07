@@ -15,7 +15,7 @@
         };
 
         scraper = pkgs.stdenv.mkDerivation {
-          name = "scraper-0.1.0";
+          name = "scraper-0.1.1";
           src = ./.;
 
           nativeBuildInputs = with pkgs; [
